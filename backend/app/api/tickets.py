@@ -391,9 +391,13 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
                  tenant: Tenant = Depends(get_tenant),
                  user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
     ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    # Map frontend sender_type to enum — "system" for internal notes,
+    # "human_agent" for regular replies.
+    sender_type_str = body.sender_type if body.sender_type in ("system", "human_agent") else "human_agent"
+    sender_type_enum = MessageSender(sender_type_str)
     msg = Message(
         ticket_id=ticket.id, sender_id=user.id,
-        sender_type=MessageSender.HUMAN_AGENT,
+        sender_type=sender_type_enum,
         sender_name=user.full_name, body=body.body, is_bot=False, is_read=body.is_read,
         reply_to=json.dumps(body.reply_to) if body.reply_to else None,
         attachments=json.dumps(body.attachments) if body.attachments else None,
@@ -408,7 +412,7 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
     db.refresh(msg)
     publish_event("message_created", {
         "ticket_id": ticket.id,
-        "who": "agent",
+        "who": sender_type_str,
         "text": body.body,
         "author": user.full_name,
         "attachments": body.attachments or [],

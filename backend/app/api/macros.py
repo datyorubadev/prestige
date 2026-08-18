@@ -185,7 +185,7 @@ def run_macro(
                 sender_name=user.full_name, body=val, is_bot=False, is_read=True
             )
             db.add(msg)
-            publish_event("message_created", {"ticket_id": ticket.id, "who": "agent", "text": val})
+            publish_event("message_created", {"ticket_id": ticket.id, "who": "human_agent", "text": val})
 
         elif atype == "add_note":
             db.add(Message(

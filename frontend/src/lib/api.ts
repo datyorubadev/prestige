@@ -30,6 +30,10 @@ import type {
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
+/** In-flight GET request dedup map — collapses concurrent identical GETs
+ *  into a single network request. Entries are removed on resolution. */
+const inflightGet = new Map<string, Promise<unknown>>();
+
 /**
  * Real backend is the default. Set NEXT_PUBLIC_API_MOCK=true only if you explicitly want mock data.
  */
@@ -88,7 +92,17 @@ export async function apiRequest<T>(
   options: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown } = {},
 ): Promise<T> {
   const method = options.method ?? "GET";
-  return USE_MOCK ? mockRoute<T>(method, path, options.body) : realRequest<T>(path, options);
+  if (USE_MOCK) return mockRoute<T>(method, path, options.body);
+
+  // Deduplicate concurrent identical GET requests
+  if (method === "GET") {
+    const existing = inflightGet.get(path);
+    if (existing) return existing as Promise<T>;
+    const p = realRequest<T>(path, options).finally(() => inflightGet.delete(path));
+    inflightGet.set(path, p);
+    return p;
+  }
+  return realRequest<T>(path, options);
 }
 
 export const api = {

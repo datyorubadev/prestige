@@ -546,9 +546,6 @@ def update_tenant_settings(payload: dict, db: Db, tenant: Tenant = Depends(get_t
         tenant.primary_color = str(payload.get("primaryColor") or payload.get("color"))
     db.commit()
     db.refresh(tenant)
-    # Invalidate cached tenant so subsequent reads see the update
-    from app.core.cache import tenant_cache
-    tenant_cache.invalidate(f"tenant:{tenant.id}")
     from app.services.serializers import tenant_dto
     return tenant_dto(tenant)
 

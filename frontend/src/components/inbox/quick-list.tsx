@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
 import { Avatar } from "@/components/ui/avatar";
+import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { avatarColorFor, cn, ticketNumberFor } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -103,24 +104,13 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
 
         {/* Filter Dropdown */}
         <div className="px-3 pb-2.5">
-          <div className="relative">
-            <select
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              className="w-full appearance-none rounded-md border border-border bg-surface-2 py-1.5 pl-3 pr-8 text-[12px] font-semibold text-text shadow-2xs focus:outline-hidden focus:border-primary cursor-pointer"
-            >
-              {FILTER_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <Icon
-              name="chevron-down"
-              size={12}
-              className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-text-3"
-            />
-          </div>
+          <Select
+            value={filter}
+            onChange={setFilter}
+            options={FILTER_OPTIONS}
+            size="sm"
+            ariaLabel="Filter conversations"
+          />
         </div>
       </div>
 

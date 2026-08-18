@@ -417,7 +417,7 @@ function MessageBubble({
     );
   }
 
-  if (message.who === "human_agent") {
+  if (message.who === "human_agent" || message.who === "agent") {
     const who = ticket.assignee ?? agentName;
     const agent = agents.find((a) => a.name === who);
     const color = agent?.color ?? avatarColorFor(who);

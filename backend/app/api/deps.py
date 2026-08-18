@@ -91,8 +91,6 @@ def get_tenant(db: Db, user: User = Depends(get_current_user)) -> Tenant:
     For team roles the active tenant must be backed by an active membership
     row (tenant_members), so a stale token or a removed membership cannot
     access a workspace they no longer belong to.
-
-    Uses a 60s TTL cache to avoid redundant DB reads under high concurrency.
     """
     tenant_id = user.tenant_id
     if not tenant_id:
@@ -101,17 +99,9 @@ def get_tenant(db: Db, user: User = Depends(get_current_user)) -> Tenant:
     if user.role in ("owner", "agent") and not membership:
         raise TenantNotFound("No active membership for this tenant")
 
-    # Check cache first
-    from app.core.cache import tenant_cache
-    cache_key = f"tenant:{tenant_id}"
-    cached = tenant_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
     tenant = db.get(Tenant, tenant_id)
     if not tenant:
         raise TenantNotFound()
-    tenant_cache.set(cache_key, tenant)
     return tenant
 
 

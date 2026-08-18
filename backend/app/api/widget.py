@@ -64,7 +64,7 @@ def widget_messages(ticketId: str, db: Db) -> dict:
         who = (
             "customer"
             if m.sender_type == "customer"
-            else "ai" if m.is_bot else "agent"
+            else "ai" if m.is_bot else "human_agent"
         )
         att_list = []
         if m.attachments:

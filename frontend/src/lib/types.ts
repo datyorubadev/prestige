@@ -18,7 +18,7 @@ export type TicketType = "complaint" | "request" | "inquiry" | "unclassified";
 
 export type TicketChannel = "chat" | "whatsapp" | "portal" | "email" | "telegram" | "sms";
 
-export type MessageSender = "customer" | "ai_bot" | "human_agent" | "system";
+export type MessageSender = "customer" | "ai_bot" | "human_agent" | "system" | "agent";
 
 export type KnowledgeType = "pdf" | "link" | "raw_text";
 

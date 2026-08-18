@@ -8,6 +8,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
 import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { LabelChip } from "@/components/ui/label-chip";
 import { useToast } from "@/components/ui/toast";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -147,10 +148,35 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
         const tid = String(ev.data?.ticket_id ?? "");
         if (ticket && (tid === ticket.id || tid === ticketId)) {
           const text = String(ev.data?.text ?? "");
-          const who = String(ev.data?.who ?? "customer") as TicketMessage["who"];
+          // Normalize legacy "agent" → "human_agent", and "system" stays as-is for notes
+          const rawWho = String(ev.data?.who ?? "customer");
+          const who: TicketMessage["who"] = rawWho === "agent" ? "human_agent" : rawWho as TicketMessage["who"];
           const author = ev.data?.author ? String(ev.data.author) : undefined;
           const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as WidgetAttachment[]) : [];
 
+          // Skip self-echo: don't add the message if we already have it optimistically
+          if (who === "human_agent" && author === agentName) {
+            setTicket((prev) => {
+              if (!prev) return null;
+              // Check if an optimistic message with this text already exists
+              if (prev.msgs.some((m) => m.who === "human_agent" && m.text === text && (m.id ?? "").startsWith("agent-"))) {
+                return prev;
+              }
+              // Fallback: add it (might be from another agent)
+              const newMsg: TicketMessage = {
+                id: `msg-${Date.now()}`,
+                who,
+                text,
+                author,
+                timestamp: "Just now",
+                attachments: attachments.length ? attachments : undefined,
+              };
+              return { ...prev, msgs: [...prev.msgs, newMsg], preview: text || prev.preview };
+            });
+            return;
+          }
+
+          // For customer/AI messages: dedup by text+who
           setTicket((prev) => {
             if (!prev) return null;
             if (prev.msgs.some((m) => m.text === text && m.who === who && (!attachments.length || m.attachments?.length === attachments.length))) {
@@ -397,7 +423,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
               <Icon name={channelIcon(ticket.channel)} size={13} />
             </span>
             {/* Subject */}
-            <h1 className="min-w-0 truncate text-[13.5px] font-bold text-text">{ticket.subject}</h1>
+            <h1 className="min-w-0 truncate text-[14.5px] font-bold text-text">{ticket.subject}</h1>
             {/* Status pill */}
             <Pill
               status={ticket.status}
@@ -407,7 +433,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
               className="shrink-0"
             />
           </div>
-          {/* Meta line */}
+          {/* Meta line + Labels */}
           <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-text-3">
             <span className="truncate">{ticket.cust}</span>
             <span>·</span>
@@ -424,6 +450,17 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
                 <span className={cn(slaOverdue ? "text-danger font-semibold" : "text-info")}>{ticket.sla}</span>
               </>
             )}
+            {/* Labels */}
+            {(ticket.labels ?? []).length > 0 && (
+              <>
+                <span>·</span>
+                <span className="flex items-center gap-1">
+                  {(ticket.labels ?? []).map((l) => (
+                    <LabelChip key={l} name={l} labels={labels} />
+                  ))}
+                </span>
+              </>
+            )}
           </div>
         </div>
 
@@ -437,7 +474,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             <button
               type="button"
               disabled={!prevTicket}
-              onClick={() => prevTicket && router.push(`/dashboard/tickets/${ticketNumberFor(prevTicket)}`)}
+              onClick={() => prevTicket && router.replace(`/dashboard/tickets/${ticketNumberFor(prevTicket)}`)}
               aria-label="Previous ticket"
               className="flex h-7 w-7 items-center justify-center rounded-sm border border-border bg-surface text-text-2 transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-35 cursor-pointer"
             >
@@ -446,7 +483,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             <button
               type="button"
               disabled={!nextTicket}
-              onClick={() => nextTicket && router.push(`/dashboard/tickets/${ticketNumberFor(nextTicket)}`)}
+              onClick={() => nextTicket && router.replace(`/dashboard/tickets/${ticketNumberFor(nextTicket)}`)}
               aria-label="Next ticket"
               className="flex h-7 w-7 items-center justify-center rounded-sm border border-border bg-surface text-text-2 transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-35 cursor-pointer"
             >
@@ -556,7 +593,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
         {/* Column 1: Queue sidebar */}
         <QuickList
           currentId={ticket.id}
-          onSelect={(id) => router.push(`/dashboard/tickets/${id}`)}
+          onSelect={(id) => router.replace(`/dashboard/tickets/${id}`)}
           open={queueOpen}
           onToggle={() => setQueueOpen((v) => !v)}
         />

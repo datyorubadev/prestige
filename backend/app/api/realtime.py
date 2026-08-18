@@ -88,12 +88,15 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
                 cursor = event["request_id"]
                 if event.get("type") == "message_created":
                     data = event.get("data") or {}
-                    if data.get("ticket_id") == ticket.id and data.get("who") in ("agent", "ai", "system"):
-                        await websocket.send_text(json.dumps({
+                    if data.get("ticket_id") == ticket.id and data.get("who") in ("human_agent", "ai", "system"):
+                        msg = {
                             "who": data["who"],
                             "text": data["text"],
-                            "author": data.get("author")
-                        }))
+                            "author": data.get("author"),
+                        }
+                        if data.get("attachments"):
+                            msg["attachments"] = data["attachments"]
+                        await websocket.send_text(json.dumps(msg))
 
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
