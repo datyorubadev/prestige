@@ -1,0 +1,35 @@
+fastapi>=0.141
+uvicorn[standard]
+sqlalchemy>=2.0.51
+pydantic>=2
+pydantic-settings
+email-validator
+python-multipart
+bcrypt>=4
+PyJWT
+python-dotenv
+httpx
+slowapi
+redis
+psycopg2-binary>=2.9
+requests
+beautifulsoup4
+pypdf
+scrapy>=2.11
+langchain
+langchain-groq>=1.1
+langchain-text-splitters
+langgraph
+langgraph-checkpoint
+langgraph-checkpoint-redis
+chromadb>=1.5
+apscheduler
+pytest
+pytest-asyncio
+
+# Vector DB — pgvector (recommended for production)
+# Requires PostgreSQL with pgvector extension installed
+# apt install postgresql-16-pgvector (Debian/Ubuntu)
+# brew install pgvector (macOS)
+pgvector>=0.3
+sentence-transformers>=3

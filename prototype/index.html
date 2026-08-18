@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prestige Portal — Working Mock Prototype</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ==================== LOGIN SCREEN ==================== -->
+  <div id="loginScreen" class="login-wrap hidden">
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="brand-mark">P</span>
+        <div>
+          <div class="login-title">Prestige Portal</div>
+          <div class="login-sub">Multi-tenant AI customer support</div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="loginEmail">Work email</label>
+        <div class="input-wrap"><span class="input-ic" data-ic="mail"></span>
+          <input class="input" id="loginEmail" value="bisi@nairawave.ng" spellcheck="false"></div>
+      </div>
+      <div class="field">
+        <label for="loginPass">Password</label>
+        <div class="input-wrap"><span class="input-ic" data-ic="lock"></span>
+          <input class="input" id="loginPass" type="password" value="demo1234"></div>
+      </div>
+      <button class="btn primary block" onclick="doLogin()">Sign in</button>
+      <div class="login-divider"><span>or demo as</span></div>
+      <div class="demo-roles">
+        <button class="demo-role" onclick="quickLogin('super','super_admin','S','violet')">
+          <span class="avatar violet">S</span><span><b>Super Admin</b><small>platform console</small></span></button>
+        <button class="demo-role" onclick="quickLogin('owner','owner','B','green')">
+          <span class="avatar green">B</span><span><b>Bisi · Owner</b><small>NairaWave</small></span></button>
+        <button class="demo-role" onclick="quickLogin('agent','agent','A','blue')">
+          <span class="avatar blue">A</span><span><b>Amaka · Agent</b><small>NairaWave</small></span></button>
+        <button class="demo-role" onclick="openCustomerDemo()">
+          <span class="avatar amber">C</span><span><b>Customer portal</b><small>log in · open a ticket</small></span></button>
+        <button class="demo-role" onclick="openWidgetDemo()">
+          <span class="avatar blue">W</span><span><b>Chat widget demo</b><small>floating bubble · instant chat</small></span></button>
+      </div>
+      <div class="login-foot">Mock prototype · no real credentials · role switch available in top bar</div>
+    </div>
+  </div>
+
+  <!-- ==================== APP SHELL ==================== -->
+  <div id="app" class="hidden">
+
+    <div id="impBanner" class="imp-banner hidden">
+      <span class="imp-left"><span class="imp-ic" data-ic="eye"></span> Impersonation active</span>
+      <span class="imp-mid" id="impText"></span>
+      <button class="btn sm ghost-light" onclick="endImpersonate()">Exit view</button>
+    </div>
+
+    <header class="topbar">
+      <div class="brand" onclick="navigate('dashboard')">
+        <span class="brand-mark">P</span>
+        <div class="brand-text"><b>Prestige</b><small>support platform</small></div>
+      </div>
+
+      <div class="search-box">
+        <span class="input-ic" data-ic="search"></span>
+        <input class="search-input" placeholder="Search tickets, customers, agents…" id="globalSearch">
+      </div>
+
+      <div class="top-actions">
+        <div class="rt-wrap" title="Simulated WebSocket event bus">
+          <span class="rt-dot"></span><span id="rtLabel">live</span>
+        </div>
+
+        <div class="notif-wrap">
+          <button class="icon-btn" id="notifBtn" title="Notifications">
+            <span data-ic="bell"></span>
+            <span class="notif-badge hidden" id="notifBadge">0</span>
+          </button>
+          <div class="notif-pop hidden" id="notifPop"></div>
+        </div>
+
+        <div class="role-switch" title="Demo: switch signed-in identity">
+          <button data-role="super" class="rs-btn"><span data-ic="user"></span>Super Admin</button>
+          <button data-role="owner" class="rs-btn"><span data-ic="building"></span>Owner</button>
+          <button data-role="agent" class="rs-btn"><span data-ic="headset"></span>Agent</button>
+        </div>
+
+        <button class="btn ghost sm" style="gap:7px" onclick="openCustomerDemo()" title="Open the customer-facing portal & chat widget">
+          <span data-ic="globe"></span> Customer view
+        </button>
+
+        <div class="user-chip">
+          <span class="avatar green" id="userAvatar">B</span>
+          <div class="user-meta"><b id="userName">Bisi Adeyemi</b><small id="userRole">Owner · NairaWave</small></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar"></aside>
+      <main class="main" id="main"></main>
+    </div>
+  </div>
+
+  <!-- ==================== CUSTOMER PORTAL (public demo) ==================== -->
+  <div id="customerScreen" class="cust-screen hidden">
+    <div class="cust-site">
+      <header class="cust-top">
+        <div class="cust-brand" id="custBrand">
+          <span class="brand-mark">N</span>
+          <div><b>NairaWave</b><small>help center</small></div>
+        </div>
+        <div class="spacer"></div>
+        <span class="cust-tenant">
+          <span class="input-ic" data-ic="building"></span>
+          <select class="input sm" id="custTenant" onchange="selectCustTenant()"></select>
+        </span>
+        <button class="btn ghost sm" onclick="closeCustomerDemo()"><span data-ic="arrowLeft"></span> Back to admin</button>
+      </header>
+
+      <section class="cust-hero">
+        <h1>How can we help you?</h1>
+        <p id="custHero">Ask our assistant anything, or open a ticket and our team will follow up by email.</p>
+      </section>
+
+      <div class="cust-body cust-3col">
+        <div class="cust-col">
+          <div class="card">
+            <div class="card-head"><h3>Help articles</h3><div class="hint">Instant answers from the knowledge base</div></div>
+            <div class="field" style="margin-bottom:0"><input class="input" id="kbSearch" placeholder="Search help articles…" oninput="custKbSearch()"></div>
+            <div id="kbList" class="kb-list" style="margin-top:10px"></div>
+          </div>
+        </div>
+
+        <div class="cust-col">
+          <div class="card">
+            <div class="card-head"><h3>Open a support ticket</h3><div class="hint">No chat needed — we reply by email</div></div>
+            <div class="field"><label>Full name</label><input class="input" id="custName" placeholder="e.g. Adaeze Okafor" spellcheck="false"></div>
+            <div class="field"><label>Email</label><input class="input" id="custEmail" placeholder="you@example.com" spellcheck="false" oninput="renderMyTickets()"></div>
+            <div class="row">
+              <div class="field"><label>Ticket type</label><select class="input" id="custType" onchange="custTypeChanged()"></select></div>
+              <div class="field"><label>Sub-category</label><select class="input" id="custSub"></select></div>
+            </div>
+            <div class="field"><label>Subject</label><input class="input" id="custSubject" placeholder="Short summary" spellcheck="false"></div>
+            <div class="field"><label>How can we help?</label><textarea class="input" id="custMsg" rows="4" placeholder="Describe the issue…"></textarea></div>
+            <button class="btn primary block" onclick="submitPortalTicket()"><span data-ic="ticket"></span> Create ticket</button>
+            <div class="field-hint" style="margin-top:8px">We reply by email — then chat with us on the right to follow up.</div>
+          </div>
+          <div class="card cust-track hidden" id="custTrack"></div>
+          <div class="card hidden" id="custMyTickets">
+            <div class="card-head"><h3>My tickets</h3><div class="hint">Past tickets for this email</div></div>
+            <div id="custMyTicketsList"></div>
+          </div>
+        </div>
+
+        <div class="cust-col">
+          <div class="card">
+            <div class="card-head"><h3>Chat with the assistant</h3><div class="hint">In this portal — not a floating widget</div></div>
+            <p style="font-size:13px;color:var(--text-2);margin:6px 0 14px">Ask about transfers, refunds, PIN resets or anything else. If it needs a human, we hand you over instantly.</p>
+            <div class="w-chat portal-chat" id="portalChat"></div>
+            <div class="w-input">
+              <input class="inp" id="portalInp" placeholder="Type a message…" aria-label="Message" onkeydown="if(event.key==='Enter')custSend()">
+              <button class="w-send" style="background:#00a86b" onclick="custSend()"><span data-ic="send"></span></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== CHAT WIDGET DEMO (public website) ==================== -->
+  <div id="widgetScreen" class="cust-screen hidden">
+    <div class="wly-site">
+      <header class="cust-top">
+        <div class="cust-brand" id="wlyBrand">
+          <span class="brand-mark">N</span>
+          <div><b>NairaWave</b><small>digital bank</small></div>
+        </div>
+        <div class="spacer"></div>
+        <span class="wly-tag"><span data-ic="globe"></span> yourwebsite.ng · public page</span>
+        <span class="cust-tenant">
+          <span class="input-ic" data-ic="building"></span>
+          <select class="input sm" id="wlyTenant" onchange="selectWidgetTenant()"></select>
+        </span>
+        <button class="btn ghost sm" onclick="closeWidgetDemo()"><span data-ic="arrowLeft"></span> Back</button>
+      </header>
+
+      <section class="wly-hero">
+        <h1>Banking that just works.</h1>
+        <p>Open an account in minutes, send money instantly, earn on every balance.</p>
+        <div class="wly-cta"><button class="btn primary">Get started</button><button class="btn ghost">Learn more</button></div>
+      </section>
+
+      <div class="wly-grid">
+        <div class="wly-card"><span data-ic="send"></span><b>Instant transfers</b><small>Zero-fee transfers between NairaWave accounts, 24/7.</small></div>
+        <div class="wly-card"><span data-ic="card"></span><b>Virtual cards</b><small>Create and freeze cards from the app in one tap.</small></div>
+        <div class="wly-card"><span data-ic="shield"></span><b>Bank-grade security</b><small>Encrypted sessions and 24/7 fraud monitoring.</small></div>
+      </div>
+
+      <footer class="wly-foot">Demo page · the floating bubble is the support widget served by Prestige.</footer>
+    </div>
+
+    <div class="cz-float" id="czFloat">
+      <div class="cz-window hidden" id="czWindow" role="dialog" aria-label="Chat">
+        <div class="w-head" id="custBotHead" style="background:#00a86b">
+          <div class="w-ava" id="custBotAva">N</div>
+          <div class="cz-title"><b id="custBotName">NairaWave Assistant</b><small>usually replies instantly</small></div>
+          <span class="w-state" style="color:rgba(255,255,255,.9)">● online</span>
+        </div>
+        <div class="w-body">
+          <div class="w-chat" id="custChat"></div>
+          <div class="w-input">
+            <input class="inp" id="custInp" placeholder="Type a message…" aria-label="Message" onkeydown="if(event.key==='Enter')custSend()">
+            <button class="w-send" style="background:#00a86b" onclick="custSend()"><span data-ic="send"></span></button>
+          </div>
+        </div>
+      </div>
+      <button class="cz-launcher" id="czLauncher" onclick="custToggleChat()" title="Chat with us" aria-label="Open chat"><span data-ic="bot"></span></button>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal" id="modalBox"></div>
+  </div>
+
+  <div class="toast-wrap" id="toasts"></div>
+
+  <script src="icons.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

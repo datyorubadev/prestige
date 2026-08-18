@@ -1,0 +1,870 @@
+@import "tailwindcss";
+
+/*
+  Prestige design tokens (design.md v4.0, §3 Foundations).
+  Semantic tokens only — never use a raw hex in a component when a token exists.
+  Token names mirror design.md exactly (--bg, --surface, --text, ...).
+  Tailwind v4 maps them to utilities: bg-surface, text-text-2, border-border, etc.
+*/
+
+:root {
+  --font-inter: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-sora: "Sora", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Linear Light Design Tokens (§3 Foundations) */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  --surface-3: #eef2f6;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --text: #111827;
+  --text-2: #4b5563;
+  --text-3: #9ca3af;
+  --primary: #00a86b;
+  --primary-dark: #008b57;
+  --primary-soft: #e6f7ef;
+  --primary-border: #b9e8d2;
+  --danger: #ef4444;
+  --danger-soft: #fef2f2;
+  --danger-border: #fca5a5;
+  --warning: #f59e0b;
+  --warning-dark: #d97706;
+  --warning-soft: #fffbeb;
+  --warning-border: #fde68a;
+  --info: #2563eb;
+  --info-soft: #eff6ff;
+  --info-border: #bfdbfe;
+  --violet: #7c3aed;
+  --violet-soft: #f5f3ff;
+  --violet-border: #ddd6fe;
+
+  /* Elevation (restrained Linear subtle border elevation) */
+  --shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.02);
+  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+  --shadow-overlay: 0 20px 40px -10px rgba(0, 0, 0, 0.15);
+
+  /* Internal-note rule */
+  --note-border: #d8b7ec;
+  --note-bg: #fbf3ff;
+}
+
+/* Sleek Linear-style Custom Scrollbar */
+.custom-scrollbar,
+.hover-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar,
+.hover-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track,
+.hover-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb,
+.hover-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 9999px;
+  transition: background-color 0.15s ease;
+}
+
+.custom-scrollbar:hover::-webkit-scrollbar-thumb,
+.hover-scrollbar:hover::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.6);
+}
+
+@theme {
+  /* §3.1 Color → utilities (bg-*, text-*, border-*, ...) */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-border: var(--primary-border);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-border: var(--danger-border);
+  --color-warning: var(--warning);
+  --color-warning-dark: var(--warning-dark);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-border: var(--info-border);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
+  --color-violet-border: var(--violet-border);
+  --color-note-border: var(--note-border);
+  --color-note-bg: var(--note-bg);
+
+  /* §3.2 Typography */
+  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: var(--font-sora), var(--font-inter), system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+
+  --text-display: 40px;
+  --text-display--line-height: 1.05;
+  --text-display--letter-spacing: -0.03em;
+  --text-display--font-weight: 800;
+  --text-hero: 30px;
+  --text-hero--line-height: 1.05;
+  --text-hero--letter-spacing: -0.03em;
+  --text-hero--font-weight: 800;
+  --text-h1: 1.5rem;
+  --text-h1--line-height: 2rem;
+  --text-h1--letter-spacing: -0.025em;
+  --text-h1--font-weight: 600;
+  --text-kpi: 25px;
+  --text-kpi--line-height: 1.1;
+  --text-kpi--letter-spacing: -0.01em;
+  --text-kpi--font-weight: 800;
+  --text-card-title: 15px;
+  --text-card-title--line-height: 1.3;
+  --text-card-title--font-weight: 700;
+  --text-body: 14px;
+  --text-body--line-height: 1.5;
+  --text-meta: 12px;
+  --text-meta--line-height: 1.45;
+  --text-micro: 11px;
+  --text-micro--line-height: 1.4;
+  --text-micro--letter-spacing: 0.07em;
+  --text-micro--font-weight: 700;
+  --text-code: 12px;
+  --text-code--line-height: 1.4;
+
+  /* §3.4 Radii (rounded-sm → controls, rounded-md → surfaces, rounded-lg → overlays, rounded-xl → hero) */
+  --radius-sm: 9px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 18px;
+
+  /* §3.5 Elevation → shadow-card (resting), shadow-overlay (modals/popovers), shadow-float (launcher), shadow-widget (widget window) */
+  --shadow-card: var(--shadow);
+  --shadow-overlay: var(--shadow-lg);
+  --shadow-float: none;
+  --shadow-widget: none;
+
+  /* §3.3 Spacing: 4px base, 8px grid. Tailwind's default spacing scale already equals it
+     (p-1=4px … p-7=28px). Use standard utilities; do not redefine. */
+
+  /* §3.7 Motion */
+  --duration-180: 180ms;
+  --duration-220: 220ms;
+  --duration-250: 250ms;
+
+  --animate-blink: blink 1.2s infinite;
+  --animate-pulse-ring: pulse-ring 2s ease-out infinite;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  --animate-row-flash: row-flash 1.2s ease-out;
+  --animate-launcher-ring: launcher-ring 7s linear infinite;
+  --animate-pop: pop 220ms ease;
+  --animate-slide-up: slide-up 220ms ease;
+  --animate-slide-in: slide-in 250ms ease;
+  --animate-fade: fade 180ms ease;
+
+  @keyframes blink {
+    0%, 60%, 100% { opacity: 0.25; }
+    30% { opacity: 1; }
+  }
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgba(0, 168, 107, 0.35); }
+    100% { box-shadow: 0 0 0 6px rgba(0, 168, 107, 0); }
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  @keyframes row-flash {
+    0% { background-color: var(--primary-soft); }
+    100% { background-color: transparent; }
+  }
+  @keyframes launcher-ring {
+    0%, 93% { box-shadow: 0 0 0 0 rgba(0, 168, 107, 0); }
+    94%, 100% { box-shadow: 0 0 0 10px rgba(0, 168, 107, 0.28); }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateX(24px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--primary-soft);
+    color: var(--text);
+  }
+
+  :focus-visible {
+    outline: none;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select,
+  .input-control {
+    background-color: #ffffff !important;
+  }
+
+  /* Hide the native (unstyled) clear button on type=search inputs — the
+     SearchBox renders its own brand clear control instead. */
+  input[type="search"]::-webkit-search-cancel-button,
+  input[type="search"]::-webkit-search-decoration {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  input[type="search"]::-ms-clear {
+    display: none;
+  }
+
+  /* Branded Range Slider controls */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 18px;
+    width: 18px;
+    margin-top: -6px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 168, 107, 0.35);
+    transition: transform 150ms ease, background-color 150ms ease;
+  }
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    background: var(--primary-dark);
+  }
+  input[type="range"]::-moz-range-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+  }
+  input[type="range"]::-moz-range-thumb {
+    height: 18px;
+    width: 18px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 168, 107, 0.35);
+    transition: transform 150ms ease, background-color 150ms ease;
+  }
+  input[type="range"]::-moz-range-thumb:hover {
+    transform: scale(1.15);
+    background: var(--primary-dark);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* §3.7 Skeleton shimmer (1.4s slide, 8px radius, 14px bars) */
+  .skeleton {
+    background: linear-gradient(90deg, #eef1f5 25%, #f7f9fb 50%, #eef1f5 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s linear infinite;
+    border-radius: 8px;
+  }
+
+  /* §4.5 Widget typing indicator — three 1.2s staggered dots */
+  .typing-dot {
+    width: 4.5px;
+    height: 4.5px;
+    border-radius: 9999px;
+    background: var(--text-3);
+    animation: typing-bounce 1.2s infinite ease-in-out;
+  }
+  .typing-dot:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .typing-dot:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+  @keyframes typing-bounce {
+    0%,
+    60%,
+    100% {
+      transform: translateY(0);
+      opacity: 0.5;
+    }
+    30% {
+      transform: translateY(-4px);
+      opacity: 1;
+    }
+  }
+
+  /* §3.6 Input focus: 3px soft primary ring (alternate to the 2px outline) */
+  .focus-ring-soft {
+    outline: none;
+  }
+  .focus-ring-soft:focus-visible,
+  .focus-ring-soft:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(0, 168, 107, 0.15);
+  }
+
+  /* §3.2 Metrics use tabular numerals so KPI rows/tables don't jitter */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Thin scrollbars (windows/webkit), matching the density tool */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Landing (marketing) surfaces — the landing page is a distinct surface from
+     the app shell: larger radii, full-pill buttons, soft elevation. These live
+     here so every landing component shares one button + chip vocabulary. */
+
+  .l-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 999px;
+    padding: 12px 22px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: transform 150ms ease, background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+  }
+  .l-btn:active {
+    transform: translateY(1px) scale(0.99);
+  }
+  .l-btn-primary {
+    background: var(--primary);
+    color: #fff;
+  }
+  .l-btn-primary:hover {
+    background: var(--primary-dark);
+  }
+  .l-btn-ghost {
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+  }
+  .l-btn-ghost:hover {
+    border-color: var(--text-3);
+    background: var(--surface-2);
+  }
+  .l-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    background: var(--surface-2);
+    color: var(--text-2);
+  }
+
+  /* §3.8 Menus & dropdowns — brand panels for search, notifications, canned
+     responses, etc. Built on semantic tokens (surface/border/text); pop in on
+     open. Elevation is a single token so re-enabling shadows lifts every
+     popover consistently. */
+  .menu-panel {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-lg);
+    animation: pop 220ms ease;
+  }
+
+  .menu-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .menu-label {
+    padding: 8px 10px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    text-align: left;
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  .menu-item:hover {
+    background: var(--primary-soft);
+    color: var(--primary-dark);
+  }
+
+  .menu-item[aria-selected="true"] {
+    background: var(--surface-2);
+  }
+
+  .menu-item.active {
+    background: var(--primary-soft);
+    color: var(--primary-dark);
+    font-weight: 600;
+  }
+
+  .menu-divider {
+    height: 1px;
+    background: var(--border);
+  }
+
+  .menu-empty {
+    padding: 24px 16px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-3);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* §4.1 Select / dropdown — the one branded control for choosing an     */
+  /* option. Trigger is a control (9px radius, hairline border, 12px      */
+  /* padding); the trailing chevron inherits the trigger's right padding  */
+  /* so its gutter is identical on every dropdown. Items reuse .menu-item */
+  /* (same 8px/10px padding + 7px radius as canned/search/notifications). */
+  /* ------------------------------------------------------------------ */
+
+  .dd {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+  }
+
+  .dd-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #ffffff;
+    color: var(--text);
+    font-size: 13.5px;
+    font-weight: 500;
+    line-height: 1.4;
+    text-align: left;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .dd-trigger:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: #ffffff;
+  }
+
+  .dd-trigger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: var(--surface-2);
+  }
+
+  .dd-trigger[aria-expanded="true"] {
+    border-color: var(--primary);
+    background: #ffffff;
+    box-shadow: 0 0 0 3px rgba(0, 168, 107, 0.15);
+  }
+
+  /* Compact variant — toolbar / header inline selects (padding 6px 10px) */
+  .dd-trigger.sm {
+    padding: 6px 10px;
+    font-size: 12.5px;
+    border-radius: var(--radius-sm);
+  }
+
+  .dd-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dd-placeholder {
+    color: var(--text-3);
+  }
+
+  /* Chevron: sits inside the trigger's right padding (12px, or 10px on .sm)
+     so the glyph gutter matches the control edge — never extra, never less. */
+  .dd-chevron {
+    flex: 0 0 auto;
+    color: var(--text-3);
+    transition: transform 180ms ease;
+  }
+
+  .dd-trigger[aria-expanded="true"] .dd-chevron {
+    transform: rotate(180deg);
+  }
+
+  .dd-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    left: 0;
+    z-index: 90;
+    max-height: 264px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-lg);
+    animation: pop 220ms ease;
+  }
+
+  /* Bottom-anchored variant — opens above the trigger instead of below so
+     selects in footers/pagination aren't clipped by the viewport edge. */
+  .dd-panel-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* §4.1 Text input / textarea — shares the select's control geometry    */
+  /* (12px padding, hairline border, radius-sm) so every form field reads  */
+  /* identically. Forms use these in <Field> labels.                      */
+  /* ------------------------------------------------------------------ */
+
+  .input-control {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #ffffff;
+    color: var(--text);
+    font-size: 13.5px;
+    font-weight: 500;
+    line-height: 1.4;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .input-control::placeholder {
+    color: var(--text-3);
+    font-weight: 400;
+  }
+
+  .input-control:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: #ffffff;
+  }
+
+  .input-control:focus-visible,
+  .input-control:focus {
+    outline: none;
+    border-color: var(--primary);
+    background: #ffffff;
+    box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+
+  .input-control:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+    background: var(--surface-2);
+  }
+
+  /* Universal input autofill & focus background lock */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active,
+  textarea:-webkit-autofill,
+  textarea:-webkit-autofill:hover,
+  textarea:-webkit-autofill:focus,
+  textarea:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0px 1000px #ffffff inset !important;
+    -webkit-text-fill-color: var(--text) !important;
+    background-color: #ffffff !important;
+    transition: background-color 5000s ease-in-out 0s;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* §4.1 Modal — the only overlay surface. Overlay fades in, panel       */
+  /* slides up 16px (design.md §3.7). Focus lands in the panel, Esc and   */
+  /* overlay click close; z-index sits above popovers (80–90) and below   */
+  /* toasts (120).                                                       */
+  /* ------------------------------------------------------------------ */
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(15, 23, 42, 0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    animation: fade 180ms ease;
+  }
+
+  .modal-panel {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 520px;
+    max-height: min(calc(100dvh - 48px), 720px);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-overlay);
+    animation: slide-up 220ms ease;
+  }
+
+  .modal-panel.lg {
+    max-width: 720px;
+  }
+
+  .modal-panel.sm {
+    max-width: 440px;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 16px 20px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .modal-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .modal-close {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: var(--text-2);
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  .modal-close:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+
+  .modal-body {
+    padding: 20px;
+    overflow-y: auto;
+  }
+
+  .modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: #ffffff;
+  }
+
+  /* §3.2 Outline action buttons hover state (only for explicit outline classes) */
+  .btn-outline-primary:hover:not(:disabled),
+  .btn-primary-outline:hover:not(:disabled) {
+    background-color: var(--primary) !important;
+    color: #ffffff !important;
+    border-color: var(--primary) !important;
+  }
+  .btn-outline-primary:hover:not(:disabled) *,
+  .btn-primary-outline:hover:not(:disabled) * {
+    color: #ffffff !important;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* §4.2 Context rail — collapsible blocks (hairline separated) and the  */
+  /* nav `.count` badge. These codify the patterns used by the inbox's    */
+  /* context rail and the sidebar so future sections/navs stay identical. */
+  /* ------------------------------------------------------------------ */
+
+  .cx-block {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .cx-block:last-child {
+    border-bottom: 0;
+  }
+
+  .cx-block-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 16px;
+    background: none;
+    border: 0;
+    color: var(--text-3);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    text-align: left;
+    cursor: pointer;
+    transition: color 150ms ease;
+  }
+
+  .cx-block-header:hover {
+    color: var(--text-2);
+  }
+
+  .cx-block-body {
+    padding: 0 16px 16px;
+  }
+
+  /* §4.2 Sidebar queued-work count — danger, white, 999px capsule */
+  .nav-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  aside, header, nav, .no-print, button, [role="tooltip"] {
+    display: none !important;
+  }
+  main {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-break-inside-avoid {
+    break-inside: avoid;
+  }
+}
+
+.print-only {
+  display: none;
+}
+
+/* Ensure Next.js dev tools do not overlap or block widgets */
+nextjs-portal,
+#nextjs-portal,
+[data-nextjs-toast-wrapper],
+[data-nextjs-dialog-overlay] {
+  pointer-events: none !important;
+}

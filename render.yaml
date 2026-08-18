@@ -1,0 +1,73 @@
+services:
+  # ── Backend (FastAPI) ──────────────────────────────────────────────
+  - type: web
+    name: prestige-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: prestige-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: prestige-redis
+          type: redis
+          property: connectionString
+      - key: CORS_ORIGINS
+        sync: false
+        # Set to your Vercel frontend URL after deploying frontend
+        value: https://your-frontend.vercel.app
+      - key: FRONTEND_URL
+        sync: false
+        value: https://your-frontend.vercel.app
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_STT_MODEL
+        value: whisper-large-v3-turbo
+      - key: EMAIL_MOCK
+        value: "true"
+      - key: SUPER_ADMIN_EMAIL
+        value: root@portal.ng
+      - key: SUPER_ADMIN_PASSWORD
+        sync: false
+      - key: GRAPH_CHECKPOINTER
+        value: memory
+      - key: CHROMA_DATA_DIR
+        value: /tmp/chroma_data
+    healthCheckPath: /health
+    autoDeploy: true
+    plan: free
+
+  # ── PostgreSQL (Neon recommended, Render fallback) ─────────────────
+  # Render's free PostgreSQL is deprecated. Use Neon instead:
+  #   1. Sign up at https://neon.tech (free tier: 512 MB, 24/7)
+  #   2. Create a project, copy the connection string
+  #   3. Set DATABASE_URL in the backend env vars above
+  #
+  # If you MUST use Render's DB (paid), uncomment below:
+  # - type: database
+  #   name: prestige-db
+  #   plan: free
+  #   databaseName: prestige
+  #   ipAllowList: []
+
+  # ── Redis (Upstash recommended, Render fallback) ───────────────────
+  # Render's free Redis was removed. Use Upstash instead:
+  #   1. Sign up at https://upstash.com (free tier: 10K commands/day)
+  #   2. Create a Redis database, copy the REDIS_URL
+  #   3. Set REDIS_URL in the backend env vars above
+  #
+  # If you MUST use Render's Redis (paid), uncomment below:
+  # - type: redis
+  #   name: prestige-redis
+  #   plan: free
+  #   ipAllowList: []
+  #   maxmemoryPolicy: allkeys-lru
