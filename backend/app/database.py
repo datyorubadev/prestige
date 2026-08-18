@@ -148,6 +148,23 @@ def _add_missing_columns_pg(pg_engine) -> None:
                         pass
 
 
+def _ensure_indexes() -> None:
+    """Create performance indexes that create_all() won't add to existing tables."""
+    _INDEXES = [
+        "CREATE INDEX IF NOT EXISTS ix_tickets_tenant_updated ON tickets (tenant_id, updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_tickets_tenant_assignee ON tickets (tenant_id, assignee_id)",
+        "CREATE INDEX IF NOT EXISTS ix_tickets_tenant_assignee_status ON tickets (tenant_id, assignee_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_users_tenant_id ON users (tenant_id)",
+    ]
+    with engine.connect() as conn:
+        for ddl in _INDEXES:
+            try:
+                conn.execute(text(ddl))
+            except Exception:
+                pass  # Index may already exist or table missing
+        conn.commit()
+
+
 def migrate_schema() -> None:
     """Create missing tables + add missing columns so old DBs keep working.
 
@@ -168,6 +185,7 @@ def migrate_schema() -> None:
                     if col not in existing:
                         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
             conn.commit()
+        _ensure_indexes()
 
         try:
             _ensure_default_channels()
@@ -198,6 +216,7 @@ def migrate_schema() -> None:
                 ddl_engine.dispose()
         else:
             _add_missing_columns_pg(engine)
+        _ensure_indexes()
         try:
             _ensure_default_channels()
             _ensure_memberships()

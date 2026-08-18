@@ -13,32 +13,146 @@ interface UseRealtimeOptions {
   enabled?: boolean;
 }
 
-/**
- * Event-bus client (guide §6.6, §5.9). Opens `WS /ws/events` with the access
- * token and dispatches typed events to the subscribed handlers. When the
- * socket cannot connect (corporate proxies, or mock mode with no WS server)
- * it degrades to polling `GET /api/events?since=<cursor>` every 10s.
- *
- * In mock mode the event bus lives in-process (src/lib/mock), so the socket
- * and polling paths are skipped entirely and subscribers receive pushes the
- * moment a mutation calls emitEvent().
- *
- * Usage — dashboards subscribe once and update state on push, no refetch:
- *   const { connected } = useRealtime({
- *     ticket_updated: (ev) => patchTicket(ev.data.ticket_id),
- *     settings_changed: (ev) => refetchSettings(),
- *   });
- */
+/* ── Singleton WebSocket manager ─────────────────────────────────────
+ *  One shared connection for the entire app. Individual useRealtime
+ *  calls subscribe/unsubscribe from this bus instead of opening their
+ *  own connections. This eliminates 4-5 redundant WS handshakes and
+ *  token-refresh calls per page load. */
+
+let sharedSocket: WebSocket | null = null;
+let sharedPoll: ReturnType<typeof setInterval> | null = null;
+let sharedConnected = false;
+let sharedDisposed = false;
+let authRetried = false;
+const subscribers = new Map<number, Record<string, RealtimeHandler>>();
+let nextId = 1;
+let cursorRef: string | null = null;
+const connectionListeners = new Set<(connected: boolean) => void>();
+
+function setConnected(v: boolean) {
+  sharedConnected = v;
+  for (const fn of connectionListeners) fn(v);
+}
+
+function dispatch(raw: string) {
+  let ev: EventBusEnvelope;
+  try {
+    ev = JSON.parse(raw) as EventBusEnvelope;
+  } catch {
+    return;
+  }
+  cursorRef = ev.request_id;
+  for (const [, handlers] of subscribers) {
+    handlers[ev.type]?.(ev);
+  }
+}
+
+function startPolling() {
+  if (sharedPoll) return;
+  setConnected(false);
+  sharedPoll = setInterval(async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/events${cursorRef ? `?since=${encodeURIComponent(cursorRef)}` : ""}`,
+      );
+      if (!res.ok) return;
+      const list = (await res.json()) as EventBusEnvelope[];
+      for (const ev of list) {
+        cursorRef = ev.request_id;
+        for (const [, handlers] of subscribers) {
+          handlers[ev.type]?.(ev);
+        }
+      }
+    } catch {
+      // keep polling on transient failures
+    }
+  }, 10_000);
+}
+
+function openSocket(token: string | null) {
+  const url = `${wsEndpoint("/ws/events")}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  let socket: WebSocket;
+  try {
+    socket = new WebSocket(url);
+  } catch {
+    startPolling();
+    return;
+  }
+  sharedSocket = socket;
+  socket.onopen = () => setConnected(true);
+  socket.onmessage = (m) => dispatch(String(m.data));
+  socket.onerror = () => socket.close();
+  socket.onclose = (e) => {
+    if (sharedSocket === socket) sharedSocket = null;
+    if (sharedDisposed) return;
+    if (e.code === 4401 || e.code === 4403 || e.code === 1008) {
+      void refreshAndReconnect();
+      return;
+    }
+    startPolling();
+  };
+}
+
+const refreshAndReconnect = async () => {
+  if (authRetried) {
+    startPolling();
+    return;
+  }
+  authRetried = true;
+  const token = await ensureFreshAccessToken().catch(() => null);
+  if (sharedDisposed) return;
+  if (!token) {
+    startPolling();
+    return;
+  }
+  openSocket(token);
+};
+
+function ensureConnection() {
+  if (sharedDisposed) return;
+  if (subscribers.size === 0) return; // no subscribers, don't connect
+  if (sharedSocket && sharedSocket.readyState < WebSocket.CLOSING) return; // already open/opening
+  if (sharedPoll) return; // already polling
+
+  void (async () => {
+    const token = await ensureFreshAccessToken().catch(() => null);
+    if (sharedDisposed || subscribers.size === 0) return;
+    openSocket(token);
+  })();
+}
+
+function teardownIfIdle() {
+  if (subscribers.size > 0) return;
+  sharedDisposed = true;
+  sharedSocket?.close();
+  sharedSocket = null;
+  if (sharedPoll) {
+    clearInterval(sharedPoll);
+    sharedPoll = null;
+  }
+  setConnected(false);
+}
+
+// Heartbeat keeps proxies from dropping an idle socket.
+let hbInterval: ReturnType<typeof setInterval> | null = null;
+function ensureHeartbeat() {
+  if (hbInterval) return;
+  hbInterval = setInterval(() => {
+    if (sharedSocket?.readyState === WebSocket.OPEN) sharedSocket.send("ping");
+  }, 20_000);
+}
+
+/* ── useRealtime hook ─────────────────────────────────────────────── */
+
 export function useRealtime(
   handlers: Record<string, RealtimeHandler>,
   options: UseRealtimeOptions = {},
 ) {
   const { enabled = true } = options;
-  const [connected, setConnected] = useState(false);
+  const [connected, setLocalConnected] = useState(sharedConnected);
 
-  // Keep the latest handlers without forcing a reconnect on every render.
   const handlersRef = useRef(handlers);
-  const cursorRef = useRef<string | null>(null);
+  const idRef = useRef<number>(0);
 
   useEffect(() => {
     handlersRef.current = handlers;
@@ -47,139 +161,46 @@ export function useRealtime(
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
 
-    // Mock mode: the emitter and subscribers share one in-process bus.
+    // Mock mode: in-process bus (unchanged).
     if (USE_MOCK) {
       const unsubscribe = subscribeEvents((ev) => {
-        cursorRef.current = ev.request_id;
+        cursorRef = ev.request_id;
         handlersRef.current[ev.type]?.(ev);
       });
-      const t = setTimeout(() => setConnected(true), 0);
+      const t = setTimeout(() => setLocalConnected(true), 0);
       return () => {
         clearTimeout(t);
         unsubscribe();
       };
     }
 
-    let ws: WebSocket | null = null;
-    let poll: ReturnType<typeof setInterval> | null = null;
-    let disposed = false;
+    // Register this subscriber
+    const id = nextId++;
+    idRef.current = id;
+    subscribers.set(id, handlersRef.current);
 
-    const dispatch = (raw: string) => {
-      let ev: EventBusEnvelope;
-      try {
-        ev = JSON.parse(raw) as EventBusEnvelope;
-      } catch {
-        return;
-      }
-      cursorRef.current = ev.request_id;
-      handlersRef.current[ev.type]?.(ev);
-    };
+    // Wire up connection state listener
+    const onConnect = (v: boolean) => setLocalConnected(v);
+    connectionListeners.add(onConnect);
 
-    const startPolling = () => {
-      if (poll) return;
-      setConnected(false);
-      poll = setInterval(async () => {
-        try {
-          const res = await fetch(
-            `${API_BASE}/events${cursorRef.current ? `?since=${encodeURIComponent(cursorRef.current)}` : ""}`,
-          );
-          if (!res.ok) return;
-          const list = (await res.json()) as EventBusEnvelope[];
-          for (const ev of list) {
-            cursorRef.current = ev.request_id;
-            handlersRef.current[ev.type]?.(ev);
-          }
-        } catch {
-          // keep polling on transient failures
-        }
-      }, 10_000);
-    };
-
-    const open = (token: string | null) => {
-      const url = `${wsEndpoint("/ws/events")}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-      let socket: WebSocket;
-      try {
-        socket = new WebSocket(url);
-      } catch {
-        startPolling();
-        return;
-      }
-      ws = socket;
-      socket.onopen = () => setConnected(true);
-      socket.onmessage = (m) => dispatch(String(m.data));
-      socket.onerror = () => socket.close();
-      socket.onclose = (e) => {
-        if (ws === socket) ws = null;
-        if (disposed) return;
-        // Auth rejected (e.g. stale token): refresh once and reconnect.
-        if (e.code === 4401 || e.code === 4403 || e.code === 1008) {
-          void refreshAndReconnect();
-          return;
-        }
-        startPolling();
-      };
-    };
-
-    let authRetried = false;
-    const refreshAndReconnect = async () => {
-      if (authRetried) {
-        startPolling();
-        return;
-      }
-      authRetried = true;
-      const token = await ensureFreshAccessToken().catch(() => null);
-      if (disposed) return;
-      if (!token) {
-        startPolling();
-        return;
-      }
-      open(token);
-    };
-
-    const connect = async () => {
-      const token = await ensureFreshAccessToken().catch(() => null);
-      if (disposed) return;
-      open(token);
-    };
-
-    void connect();
-
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible" && (!ws || ws.readyState >= WebSocket.CLOSING)) {
-        if (poll) {
-          clearInterval(poll);
-          poll = null;
-        }
-        void connect();
-      }
-    };
-    const handlePageShow = (e: PageTransitionEvent) => {
-      if (e.persisted && (!ws || ws.readyState >= WebSocket.CLOSING)) {
-        if (poll) {
-          clearInterval(poll);
-          poll = null;
-        }
-        void connect();
-      }
-    };
-
-    window.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("pageshow", handlePageShow);
-
-    // Heartbeat keeps proxies from dropping an idle socket.
-    const hb = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send("ping");
-    }, 20_000);
+    // Ensure singleton connection is running
+    sharedDisposed = false;
+    ensureConnection();
+    ensureHeartbeat();
 
     return () => {
-      disposed = true;
-      window.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("pageshow", handlePageShow);
-      ws?.close();
-      clearInterval(hb);
-      if (poll) clearInterval(poll);
+      subscribers.delete(id);
+      connectionListeners.delete(onConnect);
+      teardownIfIdle();
     };
   }, [enabled]);
+
+  // Re-register handlers when they change (no reconnect needed)
+  useEffect(() => {
+    if (idRef.current) {
+      subscribers.set(idRef.current, handlers);
+    }
+  }, [handlers]);
 
   return { connected };
 }

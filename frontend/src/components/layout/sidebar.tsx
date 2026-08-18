@@ -9,7 +9,7 @@ import { useRealtime } from "@/lib/realtime";
 import { Icon, type IconName } from "@/components/icons";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { Ticket } from "@/lib/types";
+import type { } from "@/lib/types";
 
 interface NavItem {
   href: string;
@@ -103,7 +103,7 @@ const CUSTOMER_NAV: NavGroup[] = [
 export function Sidebar({ bannerActive = false }: { bannerActive?: boolean }) {
   const { user, role, impersonating } = useAuth();
   const pathname = usePathname();
-  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [openCount, setOpenCount] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
   const isAdminPath = pathname.startsWith("/admin");
@@ -138,36 +138,31 @@ export function Sidebar({ bannerActive = false }: { bannerActive?: boolean }) {
     return best;
   })();
 
-  const refreshTickets = useCallback(() => {
+  const refreshCount = useCallback(() => {
     void api
-      .get<Ticket[]>("/tickets")
-      .then((t) => setTickets(t))
-      .catch(() => setTickets([]));
+      .get<{ count: number }>("/tickets/count?status=open")
+      .then((r) => setOpenCount(r.count))
+      .catch(() => setOpenCount(null));
   }, []);
 
   useEffect(() => {
-    refreshTickets();
-  }, [refreshTickets]);
+    refreshCount();
+  }, [refreshCount]);
 
   useRealtime({
-    ticket_created: refreshTickets,
-    ticket_updated: refreshTickets,
-    ticket_escalated: refreshTickets,
-    message_created: refreshTickets,
+    ticket_created: refreshCount,
+    ticket_updated: refreshCount,
+    ticket_escalated: refreshCount,
+    message_created: refreshCount,
   });
 
   const countFor = (item: NavItem): number | null => {
     if (item.count === "open") {
-      const n = tickets.filter((t) => t.status !== "resolved" && t.status !== "closed").length;
-      return n > 0 ? n : null;
+      return openCount && openCount > 0 ? openCount : null;
     }
     if (item.count === "mine") {
-      const email = user?.email?.toLowerCase();
-      if (!email) return null;
-      const n = tickets.filter(
-        (t) => t.email.toLowerCase() === email && t.status !== "resolved" && t.status !== "closed",
-      ).length;
-      return n > 0 ? n : null;
+      // For "mine" count, we'd need a separate endpoint; fall back to null for now.
+      return null;
     }
     return null;
   };

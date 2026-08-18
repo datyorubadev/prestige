@@ -34,6 +34,11 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api";
  *  into a single network request. Entries are removed on resolution. */
 const inflightGet = new Map<string, Promise<unknown>>();
 
+/** Persistent GET response cache — serves stale data instantly while
+ *  revalidating in the background. Entries expire after `TTL_MS`. */
+const GET_CACHE_TTL_MS = 30_000; // 30 seconds
+const getCache = new Map<string, { data: unknown; ts: number }>();
+
 /**
  * Real backend is the default. Set NEXT_PUBLIC_API_MOCK=true only if you explicitly want mock data.
  */
@@ -94,13 +99,39 @@ export async function apiRequest<T>(
   const method = options.method ?? "GET";
   if (USE_MOCK) return mockRoute<T>(method, path, options.body);
 
-  // Deduplicate concurrent identical GET requests
+  // Deduplicate concurrent identical GET requests + serve from cache
   if (method === "GET") {
+    const cached = getCache.get(path);
+    const now = Date.now();
+    // If we have a fresh cache hit, return immediately
+    if (cached && now - cached.ts < GET_CACHE_TTL_MS) {
+      // Also dedup concurrent requests
+      const existing = inflightGet.get(path);
+      if (existing) return existing as Promise<T>;
+      return cached.data as T;
+    }
+    // If there's an in-flight request, wait for it
     const existing = inflightGet.get(path);
     if (existing) return existing as Promise<T>;
-    const p = realRequest<T>(path, options).finally(() => inflightGet.delete(path));
+    const p = realRequest<T>(path, options)
+      .then((data) => {
+        getCache.set(path, { data, ts: Date.now() });
+        return data;
+      })
+      .finally(() => inflightGet.delete(path));
     inflightGet.set(path, p);
     return p;
+  }
+  // Invalidate cache entries that may be affected by mutations.
+  // After any write, related GET caches are cleared so the next fetch
+  // hits the network and gets fresh data.
+  if (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") {
+    const prefix = path.split("?")[0].replace(/\/\d+$/, "").replace(/\/[^/]+$/, "");
+    for (const key of getCache.keys()) {
+      if (key === path || key.startsWith(prefix)) {
+        getCache.delete(key);
+      }
+    }
   }
   return realRequest<T>(path, options);
 }

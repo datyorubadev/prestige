@@ -23,6 +23,24 @@ def _check_status_transition(user_role: str, new_status: str) -> None:
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
 
+@router.get("/count")
+def ticket_count(
+    db: Db,
+    tenant: Tenant = Depends(get_tenant),
+    user: User = Depends(require_perm(TICKETS_MANAGE)),
+    status: str | None = Query(default=None),
+) -> dict:
+    """Lightweight badge-count endpoint — returns just the total, no ticket rows."""
+    from sqlalchemy import func
+    qry = db.query(func.count(Ticket.id)).filter(Ticket.tenant_id == tenant.id)
+    if status and status != "all":
+        if status == "open":
+            qry = qry.filter(Ticket.status.notin_(["resolved", "closed"]))
+        else:
+            qry = qry.filter(Ticket.status == status)
+    return {"count": qry.scalar() or 0}
+
+
 class TicketUpdate(BaseModel):
     assignee_id: str | None = None
     team_id: str | None = None

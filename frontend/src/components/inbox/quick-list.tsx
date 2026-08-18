@@ -46,11 +46,39 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
     loadTickets();
   }, [loadTickets]);
 
-  // Re-fetch when messages come in so the list reorders by activity
+  // Optimistic realtime: patch the ticket in-place and move it to the top,
+  // instead of refetching the entire list on every event.
   useRealtime(
     {
-      message_created: () => { void loadTickets(); },
-      ticket_updated: () => { void loadTickets(); },
+      message_created: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!tid) return;
+        setTickets((prev) => {
+          const idx = prev.findIndex((t) => t.id === tid);
+          if (idx === -1) return prev; // ticket not in our list, ignore
+          const ticket = prev[idx];
+          const text = String(ev.data?.text ?? ticket.preview ?? ticket.subject);
+          const updated = { ...ticket, preview: text, time: "Just now" };
+          // Move to top
+          const next = [...prev];
+          next.splice(idx, 1);
+          next.unshift(updated);
+          return next;
+        });
+      },
+      ticket_updated: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!tid) return;
+        if (ev.data?.status) {
+          setTickets((prev) => {
+            const idx = prev.findIndex((t) => t.id === tid);
+            if (idx === -1) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], status: String(ev.data.status) as Ticket["status"] };
+            return next;
+          });
+        }
+      },
     },
     { enabled: open },
   );

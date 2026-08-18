@@ -30,26 +30,38 @@ def _sse(frame: dict) -> str:
     return f"data: {json.dumps(frame)}\n\n"
 
 
-def _resolve_ticket(db: Db, ticket_id: str) -> Ticket | None:
+def _resolve_ticket(db: Db, tenant: Tenant, ticket_id: str) -> Ticket | None:
     """Resolve a ticket by raw id OR human-readable number (e.g.
     NAI20260815561159) so number-based deep links work on every assist endpoint
     — parity with app.api.tickets._get_scoped_ticket."""
     clean = ticket_id.strip()
+
+    # 1. Direct primary key lookup (exact id), tenant-scoped.
     ticket = db.get(Ticket, clean)
-    if ticket:
+    if ticket and ticket.tenant_id == tenant.id:
         return ticket
+
+    # 2. Case-insensitive id / display-number lookup within tenant scope only.
     needle = clean.lower()
     ticket = (
         db.query(Ticket)
+        .filter(Ticket.tenant_id == tenant.id)
         .filter(or_(Ticket.id.ilike(needle), Ticket.id.ilike(f"%{clean}%")))
         .first()
     )
     if ticket:
         return ticket
-    return next(
-        (t for t in db.query(Ticket).all() if format_ticket_number(t).lower() == needle),
-        None,
+
+    # 3. Formatted display-number fallback — still within the tenant scope.
+    #    display_number is indexed, so compare directly instead of loading all rows.
+    needle_num = needle.lstrip("tck")
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.tenant_id == tenant.id)
+        .filter(Ticket.display_number.ilike(needle_num))
+        .first()
     )
+    return ticket
 
 
 def _ensure_owned(ticket: Ticket, user: User) -> None:
@@ -62,8 +74,8 @@ def _ensure_owned(ticket: Ticket, user: User) -> None:
 
 
 @router.post("")
-async def assist(body: AssistRequest, db: Db, user: User = Depends(require_team)) -> StreamingResponse:
-    ticket = _resolve_ticket(db, body.ticket_id)
+async def assist(body: AssistRequest, db: Db, tenant: Tenant = Depends(get_tenant), user: User = Depends(require_team)) -> StreamingResponse:
+    ticket = _resolve_ticket(db, tenant, body.ticket_id)
     if not ticket:
         raise TenantNotFound("Ticket not found")
     _ensure_owned(ticket, user)
@@ -78,8 +90,8 @@ async def assist(body: AssistRequest, db: Db, user: User = Depends(require_team)
 
 
 @router.get("/{ticket_id}/pending")
-async def assist_pending(ticket_id: str, db: Db, user: User = Depends(require_team)) -> dict:
-    ticket = _resolve_ticket(db, ticket_id)
+async def assist_pending(ticket_id: str, db: Db, tenant: Tenant = Depends(get_tenant), user: User = Depends(require_team)) -> dict:
+    ticket = _resolve_ticket(db, tenant, ticket_id)
     if not ticket:
         raise TenantNotFound("Ticket not found")
     _ensure_owned(ticket, user)
@@ -89,8 +101,8 @@ async def assist_pending(ticket_id: str, db: Db, user: User = Depends(require_te
 
 @router.post("/{ticket_id}/approve")
 async def assist_approve(ticket_id: str, body: ApproveRequest,
-                         db: Db, user: User = Depends(require_team)) -> dict:
-    ticket = _resolve_ticket(db, ticket_id)
+                         db: Db, tenant: Tenant = Depends(get_tenant), user: User = Depends(require_team)) -> dict:
+    ticket = _resolve_ticket(db, tenant, ticket_id)
     if not ticket:
         raise TenantNotFound("Ticket not found")
     _ensure_owned(ticket, user)
