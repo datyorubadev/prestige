@@ -7,6 +7,7 @@ import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { avatarColorFor, cn, ticketNumberFor } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { useRealtime } from "@/lib/realtime";
 import type { Ticket } from "@/lib/types";
 
 interface QuickListProps {
@@ -44,6 +45,15 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
     loaded.current = true;
     loadTickets();
   }, [loadTickets]);
+
+  // Re-fetch when messages come in so the list reorders by activity
+  useRealtime(
+    {
+      message_created: () => { void loadTickets(); },
+      ticket_updated: () => { void loadTickets(); },
+    },
+    { enabled: open },
+  );
 
   const filteredTickets = (() => {
     if (filter === "mine") return tickets.filter((t) => !!t.assignee);

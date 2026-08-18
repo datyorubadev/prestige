@@ -61,6 +61,9 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   const toast = useToast();
   const agentName = user?.fullName ?? "Support Agent";
 
+  // Internal active ID — decoupled from URL so quick-list/prev-next
+  // swap content without a React route re-render (true SPA).
+  const [activeId, setActiveId] = useState(ticketId);
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [allTickets, setAllTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,27 +81,35 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
 
+  /** Swap the active ticket without triggering a Next.js route re-render.
+   *  Updates internal state + browser URL in one tick. */
+  const switchTicket = useCallback((newId: string) => {
+    if (newId === activeId) return;
+    setActiveId(newId);
+    setTicket(null);
+    setLoading(true);
+    window.history.replaceState(null, "", `/dashboard/tickets/${newId}`);
+  }, [activeId]);
+
   const loadTicket = useCallback(async () => {
-    if (!ticketId) return;
+    if (!activeId) return;
     try {
       setLoading(true);
-      const data = await api.get<Ticket>(`/tickets/${encodeURIComponent(ticketId)}`);
+      const data = await api.get<Ticket>(`/tickets/${encodeURIComponent(activeId)}`);
       setTicket(data);
+      setLoading(false); // Show the ticket immediately — don't block on past-tickets.
 
+      // Load past-tickets separately (non-blocking, secondary panel data).
       if (data.email) {
-        try {
-          const past = await api.get<PastTicket[]>(`/customers/past-tickets?email=${encodeURIComponent(data.email)}`);
-          setPastTickets(past ?? []);
-        } catch {
-          // ignore
-        }
+        api.get<PastTicket[]>(`/customers/past-tickets?email=${encodeURIComponent(data.email)}`)
+          .then((past) => setPastTickets(past ?? []))
+          .catch(() => {});
       }
     } catch {
       toast("Could not load ticket details", "danger");
-    } finally {
       setLoading(false);
     }
-  }, [ticketId, toast]);
+  }, [activeId, toast]);
 
   useEffect(() => {
     void loadTicket();
@@ -138,7 +149,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     {
       ticket_updated: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === ticketId)) {
+        if (ticket && (tid === ticket.id || tid === activeId)) {
           if (ev.data?.status) {
             setTicket((prev) => (prev ? { ...prev, status: String(ev.data.status) as Ticket["status"] } : null));
           }
@@ -146,7 +157,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       },
       message_created: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === ticketId)) {
+        if (ticket && (tid === ticket.id || tid === activeId)) {
           const text = String(ev.data?.text ?? "");
           // Normalize legacy "agent" → "human_agent", and "system" stays as-is for notes
           const rawWho = String(ev.data?.who ?? "customer");
@@ -196,14 +207,14 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       },
       customer_typing: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === ticketId)) {
+        if (ticket && (tid === ticket.id || tid === activeId)) {
           setCustomerTyping(true);
           if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
           typingTimerRef.current = setTimeout(() => setCustomerTyping(false), 3000);
         }
       },
     },
-    { enabled: Boolean(ticketId) },
+    { enabled: Boolean(activeId) },
   );
 
   const handleSend = async (attachments?: WidgetAttachment[], status?: string) => {
@@ -474,7 +485,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             <button
               type="button"
               disabled={!prevTicket}
-              onClick={() => prevTicket && router.replace(`/dashboard/tickets/${ticketNumberFor(prevTicket)}`)}
+              onClick={() => prevTicket && switchTicket(ticketNumberFor(prevTicket))}
               aria-label="Previous ticket"
               className="flex h-7 w-7 items-center justify-center rounded-sm border border-border bg-surface text-text-2 transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-35 cursor-pointer"
             >
@@ -483,7 +494,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             <button
               type="button"
               disabled={!nextTicket}
-              onClick={() => nextTicket && router.replace(`/dashboard/tickets/${ticketNumberFor(nextTicket)}`)}
+              onClick={() => nextTicket && switchTicket(ticketNumberFor(nextTicket))}
               aria-label="Next ticket"
               className="flex h-7 w-7 items-center justify-center rounded-sm border border-border bg-surface text-text-2 transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-35 cursor-pointer"
             >
@@ -593,7 +604,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
         {/* Column 1: Queue sidebar */}
         <QuickList
           currentId={ticket.id}
-          onSelect={(id) => router.replace(`/dashboard/tickets/${id}`)}
+          onSelect={switchTicket}
           open={queueOpen}
           onToggle={() => setQueueOpen((v) => !v)}
         />

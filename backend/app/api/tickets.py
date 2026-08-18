@@ -11,7 +11,7 @@ from app.core.permissions import TICKETS_MANAGE, require_perm
 from app.models import AuditLog, Customer, Label, Message, Notification, Team, Tenant, TenantMember, Ticket, User
 from app.models.common import MessageSender, NotificationType, TicketStatus, TicketType
 from app.services.event_bus import publish_event
-from app.services.serializers import ensure_ticket_number, format_ticket_number, message_dto, ticket_dto
+from app.services.serializers import ensure_ticket_number, format_ticket_number, message_dto, ticket_dto, ticket_list_dto
 
 _AGENT_ALLOWED_STATUSES = {"open", "in_progress", "waiting_for_customer", "waiting_internal", "resolved"}
 _CUSTOMER_ALLOWED_STATUSES = {"open", "closed"}
@@ -222,18 +222,42 @@ def list_tickets(
     elif sort == "subject":
         qry = qry.order_by(Ticket.subject.asc())
     else:
-        qry = qry.order_by(Ticket.created_at.desc())
+        # Default: most recently active tickets first (bubbles tickets
+        # with new messages to the top of the inbox).
+        qry = qry.order_by(Ticket.updated_at.desc())
 
     from sqlalchemy.orm import joinedload, selectinload
+    from sqlalchemy import func, literal_column
     qry = qry.options(
         joinedload(Ticket.customer),
         joinedload(Ticket.assignee),
         joinedload(Ticket.team),
         selectinload(Ticket.labels),
-        selectinload(Ticket.messages),
     )
     tickets = qry.distinct().all()
-    return [ticket_dto(t) for t in tickets]
+
+    # Efficiently fetch last message per ticket in a single query instead of
+    # loading ALL messages via selectinload (the #1 perf killer).
+    if tickets:
+        ticket_ids = [t.id for t in tickets]
+        last_msgs = (
+            db.query(
+                Message.ticket_id,
+                Message.body,
+            )
+            .filter(Message.ticket_id.in_(ticket_ids))
+            .order_by(Message.ticket_id, Message.timestamp.desc())
+            .distinct(Message.ticket_id)
+            .all()
+        )
+        last_msg_map: dict[str, Message] = {}
+        for mid, body in last_msgs:
+            last_msg_map[mid] = body  # store body string directly for preview
+        # Attach as a lightweight attribute so ticket_list_dto can read it.
+        for t in tickets:
+            t._last_message = type("_M", (), {"body": last_msg_map.get(t.id, "")})()
+
+    return [ticket_list_dto(t) for t in tickets]
 
 
 @router.post("")
@@ -279,7 +303,13 @@ def create_ticket(body: TicketCreate, db: Db, tenant: Tenant = Depends(get_tenan
 @router.get("/{ticket_id}")
 def get_ticket(ticket_id: str, db: Db, tenant: Tenant = Depends(get_tenant),
                user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
-    return ticket_dto(_get_scoped_ticket(db, tenant, ticket_id))
+    from sqlalchemy.orm import joinedload, selectinload
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    # Eager-load relationships to avoid N+1 lazy-load cascade (5 extra queries).
+    db.refresh(ticket, ["customer", "assignee", "team"])
+    _ = ticket.labels
+    _ = ticket.messages
+    return ticket_dto(ticket)
 
 
 @router.get("/{ticket_id}/messages")
@@ -405,6 +435,9 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
     db.add(msg)
     if ticket.status == TicketStatus.OPEN:
         ticket.status = TicketStatus.IN_PROGRESS
+    # Bump updated_at so the ticket bubbles to the top of inboxes sorted
+    # by most-recent-activity (the default sort).
+    ticket.updated_at = datetime.utcnow()
     # Commit before publishing so realtime subscribers who re-fetch (the agent
     # conversation pane does a wholesale refresh on message_created) can see the
     # row — otherwise the optimistic bubble is wiped by the stale fetch.

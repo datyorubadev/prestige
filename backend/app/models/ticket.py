@@ -15,6 +15,9 @@ class Ticket(Base):
         Index("ix_tickets_tenant_id", "tenant_id"),
         Index("ix_tickets_tenant_status", "tenant_id", "status"),
         Index("ix_tickets_tenant_created", "tenant_id", "created_at"),
+        Index("ix_tickets_tenant_updated", "tenant_id", "updated_at"),
+        Index("ix_tickets_tenant_assignee", "tenant_id", "assignee_id"),
+        Index("ix_tickets_tenant_assignee_status", "tenant_id", "assignee_id", "status"),
         Index("ix_tickets_customer_id", "customer_id"),
     )
 

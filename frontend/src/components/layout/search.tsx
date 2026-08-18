@@ -26,7 +26,11 @@ export function SearchBox() {
   const inputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  useEffect(() => {
+  const dataLoadedRef = useRef(false);
+
+  const loadData = () => {
+    if (dataLoadedRef.current) return;
+    dataLoadedRef.current = true;
     let active = true;
     if (isCustomer) {
       void api
@@ -48,10 +52,12 @@ export function SearchBox() {
         }
       });
     }
-    return () => {
-      active = false;
-    };
-  }, [isCustomer, tenantId]);
+  };
+
+  // Only fetch data when the search input is focused or opened — not on mount.
+  useEffect(() => {
+    if (open) loadData();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;

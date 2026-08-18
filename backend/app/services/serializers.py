@@ -183,11 +183,9 @@ def format_ticket_number(ticket) -> str:
     return build_ticket_number(prefix, dt, suffix)
 
 
-def ticket_dto(ticket: Ticket, now: datetime | None = None) -> dict:
+def _ticket_base(ticket: Ticket, now: datetime | None = None) -> dict:
+    """Shared fields between list and detail DTOs."""
     customer = ticket.customer
-    messages = list(ticket.messages) if ticket.messages else []
-    last_msg = messages[-1] if messages else None
-    preview = last_msg.body[:120] if last_msg and last_msg.body else ticket.subject
     assignee_name = ticket.assignee.full_name if ticket.assignee else None
     sla = None
     if ticket.sla_seconds_left is not None:
@@ -213,13 +211,33 @@ def ticket_dto(ticket: Ticket, now: datetime | None = None) -> dict:
         "assigneeId": ticket.assignee_id,
         "teamId": ticket.team_id,
         "teamName": ticket.team.name if ticket.team else None,
-        "preview": preview,
         "labels": [lbl.name for lbl in sorted(ticket.labels, key=lambda x: x.name)],
-        "msgs": [message_dto(m) for m in messages],
         "assist": ticket_assist(ticket),
         "csatRating": ticket.csat_rating,
         "csatComment": ticket.csat_comment,
     }
+
+
+def ticket_list_dto(ticket: Ticket, now: datetime | None = None) -> dict:
+    """Lightweight DTO for list endpoints — no messages loaded."""
+    dto = _ticket_base(ticket, now)
+    # Preview comes from the pre-loaded last_message relationship (see list query).
+    last_msg = getattr(ticket, "_last_message", None)
+    if last_msg is None and ticket.messages:
+        # Fallback: if messages were accidentally loaded, use the last one.
+        last_msg = ticket.messages[-1] if ticket.messages else None
+    dto["preview"] = last_msg.body[:120] if last_msg and last_msg.body else ticket.subject
+    return dto
+
+
+def ticket_dto(ticket: Ticket, now: datetime | None = None) -> dict:
+    """Full DTO for single-ticket detail — includes all messages."""
+    dto = _ticket_base(ticket, now)
+    messages = list(ticket.messages) if ticket.messages else []
+    last_msg = messages[-1] if messages else None
+    dto["preview"] = last_msg.body[:120] if last_msg and last_msg.body else ticket.subject
+    dto["msgs"] = [message_dto(m) for m in messages]
+    return dto
 
 
 def ticket_assist(ticket: Ticket) -> dict | None:

@@ -8,9 +8,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import or_
 
-from app.api.deps import Db, require_team
+from app.api.deps import Db, get_tenant, require_team
 from app.core.errors import TenantNotFound
-from app.models import Ticket, User
+from app.models import Tenant, Ticket, User
 from app.services import agent
 from app.services.serializers import format_ticket_number
 
