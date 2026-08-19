@@ -130,15 +130,26 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
     agents = (
         db.query(User)
         .filter(User.tenant_id == tenant.id, User.role != Role.CUSTOMER, User.is_active.is_(True))
-        .order_by(User.last_seen.is_not(None).desc(), User.created_at)
+        .order_by(
+            User.presence_status.in_(["online", "away"]).desc(),
+            User.last_seen.is_not(None).desc(),
+            User.created_at,
+        )
         .all()
     )
+    online_agents = [a for a in agents if getattr(a, "presence_status", "offline") in ("online", "away")]
     for i, agent in enumerate(agents):
         if ticket.assignee_id is None and i == 0:
             ticket.assignee_id = agent.id
         db.add(Notification(
             tenant_id=tenant.id, user_id=agent.id, type=NotificationType.ESCALATION,
             title=f"Escalation · {format_ticket_number(ticket)}", body=ticket.subject, ticket_id=ticket.id,
+        ))
+    if not online_agents:
+        db.add(Message(
+            ticket_id=ticket.id, sender_type=MessageSender.SYSTEM, sender_name="System",
+            body="No agents are currently available. A human agent will respond as soon as one comes online.",
+            is_bot=False, is_read=True,
         ))
     db.commit()
 

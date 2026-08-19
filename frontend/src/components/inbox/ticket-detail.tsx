@@ -10,12 +10,14 @@ import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { LabelChip } from "@/components/ui/label-chip";
 import { useToast } from "@/components/ui/toast";
+import { Modal } from "@/components/ui/modal";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { useRealtime } from "@/lib/realtime";
 import { ConversationPane, type ComposerMode } from "./conversation-pane";
 import { ContextRail } from "./context-rail";
 import { QuickList } from "./quick-list";
+import { ActivityTimeline } from "./activity-timeline";
 import { avatarColorFor, channelLabel, cn, isResolved, ticketNumberFor } from "@/lib/utils";
 import type {
   AgentUser,
@@ -49,9 +51,18 @@ function channelColor(channel: TicketChannel): string {
   switch (channel) {
     case "chat":     return "text-primary";
     case "email":    return "text-info";
-    case "portal":   return "text-violet";
+    case "portal":   return "text-text-3";
     case "whatsapp": return "text-emerald-500";
     default:         return "text-text-3";
+  }
+}
+
+function presenceDotColor(status?: string): string {
+  switch (status) {
+    case "online": return "#22c55e";
+    case "away":   return "#f59e0b";
+    case "busy":   return "#ef4444";
+    default:       return "#94a3b8";
   }
 }
 
@@ -78,26 +89,31 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   const [draft, setDraft] = useState("");
   const [customerTyping, setCustomerTyping] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [viewingAgents, setViewingAgents] = useState<{id: string; name: string}[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeTarget, setMergeTarget] = useState("");
   const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
+  const activityRef = useRef<HTMLDivElement>(null);
 
   /** Swap the active ticket without triggering a Next.js route re-render.
    *  Updates internal state + browser URL in one tick. */
   const switchTicket = useCallback((newId: string) => {
     if (newId === activeId) return;
     setActiveId(newId);
-    setTicket(null);
-    setLoading(true);
+    setSwitching(true);
     window.history.replaceState(null, "", `/dashboard/tickets/${newId}`);
   }, [activeId]);
 
   const loadTicket = useCallback(async () => {
     if (!activeId) return;
     try {
-      setLoading(true);
       const data = await api.get<Ticket>(`/tickets/${encodeURIComponent(activeId)}`);
       setTicket(data);
-      setLoading(false); // Show the ticket immediately — don't block on past-tickets.
+      setLoading(false);
+      setSwitching(false);
 
       // Load past-tickets separately (non-blocking, secondary panel data).
       if (data.email) {
@@ -108,6 +124,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     } catch {
       toast("Could not load ticket details", "danger");
       setLoading(false);
+      setSwitching(false);
     }
   }, [activeId, toast]);
 
@@ -143,6 +160,16 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [moreOpen]);
+
+  // Close activity panel on outside click
+  useEffect(() => {
+    if (!activityOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (activityRef.current && !activityRef.current.contains(e.target as Node)) setActivityOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [activityOpen]);
 
   // Realtime listeners
   useRealtime(
@@ -213,6 +240,29 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
           typingTimerRef.current = setTimeout(() => setCustomerTyping(false), 3000);
         }
       },
+      ticket_presence: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (ticket && tid === ticket.id) {
+          const userId = String(ev.data?.user_id ?? "");
+          const userName = String(ev.data?.user_name ?? "");
+          const action = String(ev.data?.action ?? "");
+          if (userId === user?.id) return;
+          if (action === "enter") {
+            setViewingAgents((prev) => {
+              if (prev.some((a) => a.id === userId)) return prev;
+              return [...prev, { id: userId, name: userName }];
+            });
+          } else if (action === "leave") {
+            setViewingAgents((prev) => prev.filter((a) => a.id !== userId));
+          }
+        }
+      },
+      agent_presence: (ev) => {
+        const userId = String(ev.data?.user_id ?? "");
+        const online = Boolean(ev.data?.online);
+        const presenceStatus = ev.data?.presence_status as string | undefined;
+        setAgents((prev) => prev.map((a) => a.id === userId ? { ...a, online, ...(presenceStatus ? { presenceStatus: presenceStatus as AgentUser["presenceStatus"] } : {}) } : a));
+      },
     },
     { enabled: Boolean(activeId) },
   );
@@ -257,43 +307,47 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   };
 
   const handleResolve = async (id: string) => {
+    setTicket((prev) => (prev ? { ...prev, status: "resolved" } : null));
     try {
       await api.patch(`/tickets/${encodeURIComponent(id)}`, { status: "resolved" });
-      setTicket((prev) => (prev ? { ...prev, status: "resolved" } : null));
       toast("Ticket marked as resolved");
     } catch {
       toast("Could not update status", "danger");
+      void loadTicket();
     }
   };
 
   const handleReopen = async (id: string) => {
+    setTicket((prev) => (prev ? { ...prev, status: "open" } : null));
     try {
       await api.patch(`/tickets/${encodeURIComponent(id)}`, { status: "open" });
-      setTicket((prev) => (prev ? { ...prev, status: "open" } : null));
       toast("Ticket reopened");
     } catch {
       toast("Could not reopen ticket", "danger");
+      void loadTicket();
     }
   };
 
   const handleAssign = async (id: string, assignee: string | null) => {
+    const match = agents.find((a) => a.name === assignee);
+    setTicket((prev) => (prev ? { ...prev, assignee: assignee ?? null } : null));
     try {
-      const match = agents.find((a) => a.name === assignee);
       await api.patch(`/tickets/${encodeURIComponent(id)}`, { assignee_id: match?.id ?? null });
-      setTicket((prev) => (prev ? { ...prev, assignee: assignee ?? null } : null));
       toast(assignee ? `Assigned to ${assignee}` : "Unassigned ticket");
     } catch {
       toast("Could not update assignee", "danger");
+      void loadTicket();
     }
   };
 
   const handleEscalate = async (id: string) => {
+    setTicket((prev) => (prev ? { ...prev, status: "escalated" } : null));
     try {
       await api.patch(`/tickets/${encodeURIComponent(id)}`, { status: "escalated" });
-      setTicket((prev) => (prev ? { ...prev, status: "escalated" } : null));
       toast("Ticket escalated");
     } catch {
       toast("Could not escalate ticket", "danger");
+      void loadTicket();
     }
   };
 
@@ -301,6 +355,93 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     if (!ticket || !agentName) return;
     await handleAssign(ticket.id, agentName);
   };
+
+  const handleSnooze = async (id: string, until: string) => {
+    setTicket((prev) => (prev ? { ...prev, snoozedUntil: until } : null));
+    try {
+      await api.post(`/tickets/${encodeURIComponent(id)}/snooze`, { until });
+      toast(`Snoozed until ${new Date(until).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`);
+    } catch {
+      toast("Could not snooze ticket", "danger");
+      void loadTicket();
+    }
+  };
+
+  const handleUnsnooze = async (id: string) => {
+    setTicket((prev) => (prev ? { ...prev, snoozedUntil: undefined } : null));
+    try {
+      await api.post(`/tickets/${encodeURIComponent(id)}/unsnooze`);
+      toast("Ticket unsnoozed");
+    } catch {
+      toast("Could not unsnooze ticket", "danger");
+      void loadTicket();
+    }
+  };
+
+  // Prev / next navigation
+  const currentIndex = useMemo(() => {
+    if (!ticket) return -1;
+    return allTickets.findIndex((t) => t.id === ticket.id);
+  }, [allTickets, ticket]);
+  const prevTicket = currentIndex > 0 ? allTickets[currentIndex - 1] : null;
+  const nextTicket = currentIndex >= 0 && currentIndex < allTickets.length - 1 ? allTickets[currentIndex + 1] : null;
+
+  // ── Keyboard shortcuts ──
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      const isInput = tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement).isContentEditable;
+      if (isInput) return;
+
+      switch (e.key.toLowerCase()) {
+        case "j": {
+          e.preventDefault();
+          if (nextTicket) switchTicket(ticketNumberFor(nextTicket));
+          break;
+        }
+        case "k": {
+          e.preventDefault();
+          if (prevTicket) switchTicket(ticketNumberFor(prevTicket));
+          break;
+        }
+        case "e": {
+          e.preventDefault();
+          if (ticket && !isResolved(ticket.status)) handleEscalate(ticket.id);
+          break;
+        }
+        case "n": {
+          e.preventDefault();
+          setComposerMode("note");
+          break;
+        }
+        case "r": {
+          e.preventDefault();
+          setComposerMode("reply");
+          break;
+        }
+        case "escape": {
+          setMoreOpen(false);
+          break;
+        }
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [nextTicket, prevTicket, ticket, activeId]);
+
+  // ── Agent collision / presence ──
+  useEffect(() => {
+    if (!ticket) return;
+    void api.post(`/tickets/${encodeURIComponent(ticket.id)}/presence`, { action: "enter" });
+    const handleBeforeUnload = () => {
+      void api.post(`/tickets/${encodeURIComponent(ticket.id)}/presence`, { action: "leave" });
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      void api.post(`/tickets/${encodeURIComponent(ticket.id)}/presence`, { action: "leave" });
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [ticket?.id]);
 
   const handleAddNote = async (id: string, text: string, attachments?: WidgetAttachment[]) => {
     try {
@@ -348,25 +489,41 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     }
   };
 
-  const handleSetLabels = async (newLabels: string[]) => {
-    if (!ticket) return;
+  const handleEditMessage = async (tId: string, mId: string, text: string) => {
     try {
-      const labelObjs = labels.filter((l) => newLabels.includes(l.name));
-      await api.patch(`/tickets/${encodeURIComponent(ticket.id)}`, { label_ids: labelObjs.map((l) => l.id) });
-      setTicket((prev) => (prev ? { ...prev, labels: newLabels } : null));
-      toast("Labels updated");
+      await api.patch(`/tickets/${encodeURIComponent(tId)}/messages/${encodeURIComponent(mId)}`, { body: text });
+      setTicket((prev) => prev ? { ...prev, msgs: prev.msgs.map((m) => (m.id === mId ? { ...m, text, edited: true } : m)) } : null);
+      toast("Message updated");
     } catch {
-      toast("Could not update labels", "danger");
+      toast("Could not edit message", "danger");
     }
   };
 
-  // Prev / next navigation
-  const currentIndex = useMemo(() => {
-    if (!ticket) return -1;
-    return allTickets.findIndex((t) => t.id === ticket.id);
-  }, [allTickets, ticket]);
-  const prevTicket = currentIndex > 0 ? allTickets[currentIndex - 1] : null;
-  const nextTicket = currentIndex >= 0 && currentIndex < allTickets.length - 1 ? allTickets[currentIndex + 1] : null;
+  const handleSetLabels = async (newLabels: string[]) => {
+    if (!ticket) return;
+    const labelObjs = labels.filter((l) => newLabels.includes(l.name));
+    setTicket((prev) => (prev ? { ...prev, labels: newLabels } : null));
+    try {
+      await api.patch(`/tickets/${encodeURIComponent(ticket.id)}`, { label_ids: labelObjs.map((l) => l.id) });
+      toast("Labels updated");
+    } catch {
+      toast("Could not update labels", "danger");
+      void loadTicket();
+    }
+  };
+
+  const handleMerge = async () => {
+    if (!ticket || !mergeTarget) return;
+    try {
+      await api.post(`/tickets/${encodeURIComponent(ticket.id)}/merge`, { primary_ticket_id: mergeTarget });
+      toast("Ticket merged");
+      setMergeOpen(false);
+      setMergeTarget("");
+      void loadTicket();
+    } catch {
+      toast("Could not merge ticket", "danger");
+    }
+  };
 
   if (loading) {
     return (
@@ -398,7 +555,12 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   const slaOverdue = (ticket.sla ?? "").includes("overdue");
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface">
+    <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface">
+      {/* ── Switching indicator ── */}
+      {switching && (
+        <div className="absolute inset-x-0 top-0 z-50 h-0.5 animate-pulse bg-primary/60" />
+      )}
+
       {/* ── Page Header ── */}
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-4 bg-surface z-10">
         {/* Back button — larger, distinct from prev/next */}
@@ -509,7 +671,11 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             placeholder="Assign to…"
             ariaLabel="Assign ticket"
             size="sm"
-            options={agents.map((a) => ({ value: a.name, label: a.name }))}
+            options={agents.map((a) => ({
+              value: a.name,
+              label: a.name,
+              dotColor: presenceDotColor(a.presenceStatus),
+            }))}
             className="w-[130px]"
           />
 
@@ -564,12 +730,50 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
                   <Icon name="user" size={13} className="text-text-3" />
                   Assign to me
                 </button>
+                {!resolved && (
+                  <button
+                    type="button"
+                    onClick={() => { setMergeOpen(true); setMoreOpen(false); }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-[12px] font-medium text-text hover:bg-surface-2 cursor-pointer"
+                  >
+                    <Icon name="merge" size={13} className="text-text-3" />
+                    Merge ticket
+                  </button>
+                )}
               </div>
             )}
           </div>
 
           {/* Divider */}
           <div className="h-5 w-px bg-border mx-0.5" />
+
+          {/* Activity Timeline toggle */}
+          <div className="relative" ref={activityRef}>
+            <button
+              type="button"
+              onClick={() => setActivityOpen((v) => !v)}
+              className={cn(
+                "inline-flex h-7 items-center gap-1 rounded-sm border px-2 text-[11px] font-medium transition-colors cursor-pointer",
+                activityOpen ? "border-primary/40 bg-primary/5 text-primary font-semibold" : "border-border bg-surface text-text-2 hover:bg-surface-2 hover:text-text",
+              )}
+              title="Activity timeline"
+            >
+              <Icon name="clock" size={13} />
+            </button>
+            {activityOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-80 max-h-96 overflow-y-auto rounded-md border border-border bg-surface shadow-lg">
+                <div className="sticky top-0 flex items-center justify-between border-b border-border bg-surface px-4 py-2.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wide text-text-3">Activity</span>
+                  <button type="button" onClick={() => setActivityOpen(false)} className="text-text-3 hover:text-text cursor-pointer">
+                    <Icon name="close" size={13} />
+                  </button>
+                </div>
+                <div className="px-4 py-2">
+                  <ActivityTimeline ticketId={ticket.id} />
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Toggle Queue */}
           <button
@@ -599,6 +803,60 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
         </div>
       </header>
 
+      {/* ── Collision Detection Banner ── */}
+      {viewingAgents.length > 0 && (
+        <div className="flex items-center gap-2 border-b border-info/30 bg-info-soft/30 px-4 py-1.5 text-[11.5px] text-info">
+          <Icon name="users" size={12} />
+          <span>
+            {viewingAgents.map((a) => a.name).join(", ")} {viewingAgents.length === 1 ? "is" : "are"} also viewing this ticket
+          </span>
+        </div>
+      )}
+
+      {/* ── Merge Modal ── */}
+      <Modal
+        open={mergeOpen}
+        onClose={() => { setMergeOpen(false); setMergeTarget(""); }}
+        title="Merge ticket"
+        icon="merge"
+        size="sm"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => { setMergeOpen(false); setMergeTarget(""); }}
+              className="rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors hover:bg-surface-2 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleMerge}
+              disabled={!mergeTarget}
+              className="rounded-sm bg-primary px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+            >
+              Merge
+            </button>
+          </>
+        }
+      >
+        <p className="text-[12.5px] text-text-2">
+          Select a primary ticket. All messages and labels will be transferred to it, and this ticket will be closed.
+        </p>
+        <label className="mt-3 block text-[11px] font-bold uppercase tracking-wide text-text-3">Primary ticket</label>
+        <Select
+          value={mergeTarget}
+          onChange={(v) => setMergeTarget(v)}
+          placeholder="Select ticket to merge into…"
+          ariaLabel="Primary ticket"
+          size="sm"
+          className="mt-1.5 w-full"
+          options={allTickets
+            .filter((t) => t.id !== ticket?.id && !isResolved(t.status))
+            .map((t) => ({ value: t.id, label: `#${ticketNumberFor(t)} — ${t.subject}` }))}
+        />
+      </Modal>
+
       {/* ── Three-Panel Workspace ── */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Column 1: Queue sidebar */}
@@ -626,6 +884,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             onEditNote={handleEditNote}
             onDeleteNote={handleDeleteNote}
             onDeleteMessage={handleDeleteMessage}
+            onEditMessage={handleEditMessage}
             typing={customerTyping}
             labels={labels}
             flat
@@ -644,6 +903,8 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
           onResolve={handleResolve}
           onEscalate={handleEscalate}
           onReopen={handleReopen}
+          onSnooze={handleSnooze}
+          onUnsnooze={handleUnsnooze}
           onAddNote={handleAddNote}
           onEditNote={handleEditNote}
           onDeleteNote={handleDeleteNote}

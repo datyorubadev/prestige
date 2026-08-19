@@ -85,13 +85,16 @@ def message_dto(msg: Message) -> dict:
         "text": msg.body,
         "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
     }
+    # Always include the author name so the frontend can display per-message
+    # attribution instead of relying on the ticket's current assignee.
+    if msg.sender_name:
+        dto["author"] = msg.sender_name
     # Internal notes are stored with sender_type=SYSTEM. The agent workspace
     # renders those as dashed, author-attributed note bubbles (kind: "note"),
     # so map the raw enum to the frontend's note shape here.
     if msg.sender_type == "system":
         dto["who"] = "human_agent"
         dto["kind"] = "note"
-        dto["author"] = msg.sender_name or None
     if msg.reply_to:
         try:
             quoted = json.loads(msg.reply_to)
@@ -105,6 +108,8 @@ def message_dto(msg: Message) -> dict:
             dto["attachments"] = []
     else:
         dto["attachments"] = []
+    if getattr(msg, "edited", False):
+        dto["edited"] = True
     return dto
 
 
@@ -215,6 +220,8 @@ def _ticket_base(ticket: Ticket, now: datetime | None = None) -> dict:
         "assist": ticket_assist(ticket),
         "csatRating": ticket.csat_rating,
         "csatComment": ticket.csat_comment,
+        "snoozedUntil": ticket.snoozed_until.isoformat() if getattr(ticket, "snoozed_until", None) else None,
+        "mergedIntoId": getattr(ticket, "merged_into_id", None),
     }
 
 
@@ -252,6 +259,10 @@ def ticket_assist(ticket: Ticket) -> dict | None:
 
 
 def tenant_dto(tenant: Tenant) -> dict:
+    agents_online = sum(
+        1 for u in (tenant.users or [])
+        if getattr(u, "presence_status", "offline") in ("online", "away") and u.is_active
+    )
     return {
         "id": tenant.id,
         "name": tenant.business_name,
@@ -280,6 +291,7 @@ def tenant_dto(tenant: Tenant) -> dict:
         "aiTokensUsed": getattr(tenant, "ai_tokens_used", 0),
         "aiTokensLimit": getattr(tenant, "ai_tokens_limit", 1000000),
         "aiSystemPrompt": getattr(tenant, "ai_system_prompt", None),
+        "agentsOnline": agents_online,
     }
 
 
@@ -300,6 +312,7 @@ def agent_dto(user: User, membership=None) -> dict:
         "tenantId": user.tenant_id,
         "active": user.is_active,
         "inboxScope": (membership.inbox_scope if membership else "all"),
+        "presenceStatus": getattr(user, "presence_status", "offline"),
     }
 
 

@@ -152,7 +152,7 @@ export function TicketList() {
   const counts = useMemo(() => {
     const list = tickets ?? [];
     const mentions = agentName
-      ? list.filter((t) => t.msgs.some((m) => m.kind === "note" && m.text.includes(`@${agentName}`)))
+      ? list.filter((t) => t.msgs?.some((m) => m.kind === "note" && m.text.includes(`@${agentName}`)))
       : [];
     return {
       All: list.length,

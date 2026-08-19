@@ -47,6 +47,8 @@ class Ticket(Base):
     csat_comment: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    merged_into_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tickets.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

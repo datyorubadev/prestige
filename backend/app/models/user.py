@@ -24,6 +24,7 @@ class User(Base):
     color: Mapped[str] = mapped_column(String(20), default="slate")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    presence_status: Mapped[str] = mapped_column(String(20), default="offline")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tenant: Mapped["Tenant | None"] = relationship(back_populates="users")  # noqa: F821

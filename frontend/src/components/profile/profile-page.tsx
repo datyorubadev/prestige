@@ -7,10 +7,19 @@ import { setSessionUser } from "@/lib/auth-store";
 import { useToast } from "@/components/ui/toast";
 import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
-import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/components/icons";
 import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 import type { SessionUser } from "@/lib/types";
+
+type PresenceStatus = "online" | "away" | "busy" | "offline";
+
+const PRESENCE_OPTIONS: { value: PresenceStatus; label: string; color: string; dotColor: string }[] = [
+  { value: "online", label: "Online", color: "border-emerald-500 bg-emerald-500/5 text-emerald-700", dotColor: "#22c55e" },
+  { value: "away", label: "Away", color: "border-amber-500 bg-amber-500/5 text-amber-700", dotColor: "#f59e0b" },
+  { value: "busy", label: "Busy", color: "border-red-500 bg-red-500/5 text-red-700", dotColor: "#ef4444" },
+  { value: "offline", label: "Offline", color: "border-border bg-surface-2 text-text-3", dotColor: "#94a3b8" },
+];
 
 export function ProfilePage() {
   const { user } = useAuth();
@@ -18,8 +27,9 @@ export function ProfilePage() {
 
   const [name, setName] = useState(user?.fullName ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
-  const [online, setOnline] = useState(true);
+  const [presenceStatus, setPresenceStatus] = useState<PresenceStatus>("online");
   const [saving, setSaving] = useState(false);
+  const [savingPresence, setSavingPresence] = useState(false);
   const [prefs, setPrefs] = useState({
     escalation: true,
     resolution: true,
@@ -36,7 +46,7 @@ export function ProfilePage() {
         userId: user.id,
         fullName: name,
         email,
-        online,
+        presence_status: presenceStatus,
         prefs,
       });
       const mergedUser: SessionUser = {
@@ -52,6 +62,19 @@ export function ProfilePage() {
       toast("Could not save profile", "danger");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const updatePresence = async (status: PresenceStatus) => {
+    setPresenceStatus(status);
+    setSavingPresence(true);
+    try {
+      await api.patch("/agents/me/presence", { status });
+      toast(`Status set to ${status}`);
+    } catch {
+      toast("Could not update presence", "danger");
+    } finally {
+      setSavingPresence(false);
     }
   };
 
@@ -104,7 +127,7 @@ export function ProfilePage() {
                 <p className="text-meta text-text-3 capitalize">{roleName}</p>
               </div>
               <div className="ml-auto">
-                <Pill status={online ? "online" : "offline"} dot tone={online ? "success" : "neutral"} />
+                <Pill status={presenceStatus} dot tone={presenceStatus === "online" ? "success" : presenceStatus === "away" ? "warning" : presenceStatus === "busy" ? "danger" : "neutral"} />
               </div>
             </div>
 
@@ -122,18 +145,30 @@ export function ProfilePage() {
               />
             </label>
 
-            <div className="flex items-center justify-between gap-3 rounded-sm border border-border bg-surface-2 px-3 py-2.5">
-              <div>
-                <p className="text-[12.5px] font-semibold text-text">Presence</p>
+            <div className="rounded-sm border border-border bg-surface-2 px-3 py-2.5">
+              <div className="mb-2">
+                <p className="text-[12.5px] font-semibold text-text">Presence status</p>
                 <p className="text-[11.5px] text-text-3">
-                  Status is pushed to dashboards via the agent_presence event
+                  {savingPresence ? "Updating…" : "Your status visible to the team and widget visitors"}
                 </p>
               </div>
-              <Switch
-                checked={online}
-                onChange={setOnline}
-                label="Presence"
-              />
+              <div className="grid grid-cols-2 gap-1.5">
+                {PRESENCE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => void updatePresence(opt.value)}
+                    disabled={savingPresence}
+                    className={cn(
+                      "flex items-center gap-2 rounded-sm border px-2.5 py-2 text-[12px] font-medium transition-colors cursor-pointer",
+                      presenceStatus === opt.value ? opt.color : "border-border bg-surface text-text-2 hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: opt.dotColor }} />
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <button

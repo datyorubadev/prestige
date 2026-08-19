@@ -148,6 +148,8 @@ export interface AgentUser {
   active?: boolean;
   /** P4 inbox scoping: what this agent sees in the conversation queue. */
   inboxScope?: InboxScope;
+  /** Presence status: online | away | busy | offline */
+  presenceStatus?: "online" | "away" | "busy" | "offline";
 }
 
 export interface TicketMessage {
@@ -231,6 +233,22 @@ export interface Ticket {
   /** Post-chat CSAT comment (collected with the rating in the widget). */
   csatComment?: string;
   csatRating?: number;
+  /** ISO datetime — ticket is snoozed until this time. */
+  snoozedUntil?: string;
+  /** If this ticket was merged, the ID of the primary ticket it was merged into. */
+  mergedIntoId?: string;
+}
+
+export interface TicketEvent {
+  id: string;
+  eventType: string;
+  field?: string;
+  oldValue?: string;
+  newValue?: string;
+  detail?: string;
+  actorName: string;
+  actorId?: string;
+  createdAt?: string;
 }
 
 export interface KnowledgeArticle {

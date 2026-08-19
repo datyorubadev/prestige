@@ -42,6 +42,7 @@ interface ConversationPaneProps {
   onEditNote: (ticketId: string, noteId: string, text: string) => void;
   onDeleteNote: (ticketId: string, noteId: string) => void;
   onDeleteMessage: (ticketId: string, messageId: string) => void;
+  onEditMessage?: (ticketId: string, messageId: string, text: string) => void;
   typing?: boolean;
   labels?: Label[];
   /** When true, strip card chrome + header — the parent page header owns
@@ -107,11 +108,13 @@ export function ConversationPane({
   onEditNote,
   onDeleteNote,
   onDeleteMessage,
+  onEditMessage,
   typing = false,
   labels,
   flat = false,
 }: ConversationPaneProps) {
   const [quote, setQuote] = useState<TicketMessage["replyTo"] | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const threadRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -181,7 +184,7 @@ export function ConversationPane({
   };
 
   const quoteFor = (m: TicketMessage): TicketMessage["replyTo"] => ({
-    author: m.who === "customer" ? ticket.cust : m.who === "ai_bot" ? "AI assistant" : ticket.assignee ?? agentName,
+    author: m.who === "customer" ? ticket.cust : m.who === "ai_bot" ? "AI assistant" : m.author || ticket.assignee || agentName,
     text: m.text,
   });
 
@@ -219,6 +222,25 @@ export function ConversationPane({
       )}
 
       {/* Thread */}
+      <div className="flex items-center gap-2 border-b border-border px-4 py-1.5">
+        <Icon name="search" size={13} className="shrink-0 text-text-3" />
+        <input
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search in conversation…"
+          aria-label="Search in conversation"
+          className="focus-ring-soft w-full bg-transparent text-[12px] text-text placeholder:text-text-3"
+        />
+        {searchQuery && (
+          <button
+            type="button"
+            onClick={() => setSearchQuery("")}
+            className="shrink-0 text-text-3 hover:text-text cursor-pointer"
+          >
+            <Icon name="close" size={12} />
+          </button>
+        )}
+      </div>
       <div ref={threadRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-4">
         {uniqueMsgs.map((m: TicketMessage, i: number) => {
           const prev = uniqueMsgs[i - 1];
@@ -229,8 +251,9 @@ export function ConversationPane({
             prev.who === m.who &&
             m.kind !== "note" &&
             prev.kind !== "note";
+          const isMatch = searchQuery.length > 1 && m.text.toLowerCase().includes(searchQuery.toLowerCase());
           return (
-            <div key={m.id ?? `m-${i}`} className="space-y-2">
+            <div key={m.id ?? `m-${i}`} className={cn("space-y-2", isMatch && "rounded-md bg-warning-soft/30 ring-1 ring-warning/30 -mx-1 px-1 py-0.5")}>
               {showDivider && <DayDivider label={dayLabel(m.timestamp)} />}
               <MessageBubble
                 message={m}
@@ -241,8 +264,10 @@ export function ConversationPane({
                 onEditNote={onEditNote}
                 onDeleteNote={onDeleteNote}
                 onDeleteMessage={onDeleteMessage}
+                onEditMessage={onEditMessage}
                 onCopy={() => copyText(m.text)}
                 onQuote={() => setQuote(quoteFor(m))}
+                highlightText={searchQuery.length > 1 ? searchQuery : undefined}
               />
             </div>
           );
@@ -359,8 +384,10 @@ function MessageBubble({
   onEditNote,
   onDeleteNote,
   onDeleteMessage,
+  onEditMessage,
   onCopy,
   onQuote,
+  highlightText,
 }: {
   message: TicketMessage;
   grouped: boolean;
@@ -370,8 +397,10 @@ function MessageBubble({
   onEditNote: (ticketId: string, noteId: string, text: string) => void;
   onDeleteNote: (ticketId: string, noteId: string) => void;
   onDeleteMessage: (ticketId: string, messageId: string) => void;
+  onEditMessage?: (ticketId: string, messageId: string, text: string) => void;
   onCopy: () => void;
   onQuote: () => void;
+  highlightText?: string;
 }) {
   if (message.kind === "note") {
     const noteId = message.id ?? "note";
@@ -418,42 +447,21 @@ function MessageBubble({
   }
 
   if (message.who === "human_agent" || message.who === "agent") {
-    const who = ticket.assignee ?? agentName;
+    const who = message.author || ticket.assignee || agentName;
     const agent = agents.find((a) => a.name === who);
     const color = agent?.color ?? avatarColorFor(who);
     return (
-      <div className={cn("group relative flex items-start justify-end gap-2.5", grouped && "mt-1")}>
-        <div className="flex max-w-[80%] flex-col items-end text-left">
-          {!grouped && <b className="mb-0.5 block text-[11px] font-bold text-text-2">{who}</b>}
-          <div className="relative rounded-md bg-primary px-3.5 py-2 text-left">
-            <Markdown text={message.text} className="text-[12.5px] leading-snug text-white text-left" />
-            <InlineAttachments attachments={message.attachments} />
-          </div>
-          <span
-            title={receiptLabel(message.status)}
-            className="mt-0.5 flex items-center gap-1 text-[10px] text-text-3 opacity-0 transition-opacity duration-150 group-hover:opacity-100"
-          >
-            {timeOfDay(message.timestamp)}
-            <Icon
-              name="check-double"
-              size={11}
-              className={cn("rounded-sm", receiptClass(message.status))}
-            />
-          </span>
-        </div>
-        {!grouped ? (
-          <Avatar name={who} color={color} size="sm" className="mt-0.5 shrink-0" />
-        ) : (
-          <div className="w-7 shrink-0" />
-        )}
-        <HoverActions
-          message={message}
-          canDelete={!!message.id}
-          onCopy={onCopy}
-          onQuote={onQuote}
-          onDelete={() => message.id && onDeleteMessage(ticket.id, message.id)}
-        />
-      </div>
+      <AgentMessageBubble
+        message={message}
+        who={who}
+        color={color}
+        grouped={grouped}
+        onCopy={onCopy}
+        onQuote={onQuote}
+        onDelete={() => message.id && onDeleteMessage(ticket.id, message.id)}
+        onEdit={onEditMessage && message.id ? () => onEditMessage(ticket.id, message.id!, message.text) : undefined}
+        highlightText={highlightText}
+      />
     );
   }
 
@@ -490,15 +498,19 @@ function MessageBubble({
 function HoverActions({
   message,
   canDelete,
+  canEdit,
   onCopy,
   onQuote,
   onDelete,
+  onEdit,
 }: {
   message: TicketMessage;
   canDelete: boolean;
+  canEdit?: boolean;
   onCopy: () => void;
   onQuote: () => void;
   onDelete: () => void;
+  onEdit?: () => void;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -533,6 +545,17 @@ function HoverActions({
         >
           <Icon name="quote" size={12} />
         </button>
+        {canEdit && onEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            title="Edit message"
+            aria-label="Edit message"
+            className="flex h-5 w-5 items-center justify-center rounded-sm text-text-3 transition-colors duration-150 hover:bg-surface-3 hover:text-text cursor-pointer"
+          >
+            <Icon name="edit" size={12} />
+          </button>
+        )}
         {canDelete && (
           <button
             type="button"
@@ -559,6 +582,111 @@ function HoverActions({
         />
       )}
     </>
+  );
+}
+
+function AgentMessageBubble({
+  message,
+  who,
+  color,
+  grouped,
+  onCopy,
+  onQuote,
+  onDelete,
+  onEdit,
+  highlightText,
+}: {
+  message: TicketMessage;
+  who: string;
+  color: string;
+  grouped: boolean;
+  onCopy: () => void;
+  onQuote: () => void;
+  onDelete: () => void;
+  onEdit?: () => void;
+  highlightText?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(message.text);
+
+  const handleSave = () => {
+    onEdit?.();
+    setEditing(false);
+  };
+
+  const displayText = highlightText && !editing
+    ? message.text.replace(new RegExp(`(${highlightText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "MARKER_START$1MARKER_END")
+    : message.text;
+
+  return (
+    <div className={cn("group relative flex items-start justify-end gap-2.5", grouped && "mt-1")}>
+      <div className="flex max-w-[80%] flex-col items-end text-left">
+        {!grouped && <b className="mb-0.5 block text-[11px] font-bold text-text-2">{who}</b>}
+        {editing ? (
+          <div className="w-full">
+            <textarea
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              rows={Math.min(Math.max(editValue.split("\n").length, 2), 8)}
+              className="focus-ring-soft w-full resize-y rounded-md border border-primary bg-surface px-3.5 py-2 text-[12.5px] leading-snug text-text text-left"
+            />
+            <div className="mt-1.5 flex items-center justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setEditing(false)}
+                className="rounded-sm px-2 py-1 text-[11px] font-semibold text-text-2 transition-colors hover:bg-surface-3 hover:text-text cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={!editValue.trim()}
+                className="inline-flex items-center gap-1 rounded-sm bg-primary px-2.5 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="check" size={12} />
+                Save
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="relative rounded-md bg-primary px-3.5 py-2 text-left">
+            <Markdown text={displayText} className="text-[12.5px] leading-snug text-white text-left" />
+            <InlineAttachments attachments={message.attachments} />
+          </div>
+        )}
+        {!editing && (
+          <span
+            title={receiptLabel(message.status)}
+            className="mt-0.5 flex items-center gap-1 text-[10px] text-text-3 opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          >
+            {message.edited && <span className="text-[9px] italic">Edited</span>}
+            {timeOfDay(message.timestamp)}
+            <Icon
+              name="check-double"
+              size={11}
+              className={cn("rounded-sm", receiptClass(message.status))}
+            />
+          </span>
+        )}
+      </div>
+      {!grouped ? (
+        <Avatar name={who} color={color} size="sm" className="mt-0.5 shrink-0" />
+      ) : (
+        <div className="w-7 shrink-0" />
+      )}
+      {!editing && (
+        <HoverActions
+          message={message}
+          canDelete={!!message.id}
+          canEdit={!!onEdit}
+          onCopy={onCopy}
+          onQuote={onQuote}
+          onDelete={onDelete}
+          onEdit={onEdit ? () => { setEditValue(message.text); setEditing(true); } : undefined}
+        />
+      )}
+    </div>
   );
 }
 

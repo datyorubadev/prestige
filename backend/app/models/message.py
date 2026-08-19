@@ -24,6 +24,7 @@ class Message(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    edited: Mapped[bool] = mapped_column(Boolean, default=False)
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reply_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachments: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of WidgetAttachment

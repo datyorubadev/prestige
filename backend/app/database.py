@@ -103,6 +103,7 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "messages": [
         ("attachments", "TEXT"),
+        ("edited", "BOOLEAN DEFAULT FALSE"),
     ],
     "tenants": [
         ("ai_enabled", "BOOLEAN DEFAULT TRUE"),
@@ -115,6 +116,8 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("team_id", "VARCHAR(36)"),
         ("csat_comment", "VARCHAR(500)"),
         ("display_number", "VARCHAR(32)"),
+        ("snoozed_until", "DATETIME"),
+        ("merged_into_id", "VARCHAR(36)"),
         # Note: waiting_for_customer and waiting_internal are string values in TicketStatus Enum, no schema migration needed
     ],
     "tenant_custom_tools": [
@@ -124,6 +127,9 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("last_executed_at", "DATETIME"),
         ("tool_type", "VARCHAR(30) DEFAULT 'api'"),
         ("config", "TEXT"),
+    ],
+    "users": [
+        ("presence_status", "VARCHAR(20) DEFAULT 'offline'"),
     ],
 }
 

@@ -262,6 +262,8 @@ class ProfileUpdate(BaseModel):
     email: str | None = None
     password: str | None = None
     color: str | None = None
+    online: bool | None = None
+    presence_status: str | None = None
 
 
 @router.post("/profile")
@@ -274,6 +276,12 @@ def update_profile(body: ProfileUpdate, db: Db, user: User = Depends(get_current
         user.color = body.color
     if body.password:
         user.password_hash = hash_password(body.password)
+    if body.presence_status:
+        user.presence_status = body.presence_status
+        user.last_seen = datetime.utcnow() if body.presence_status != "offline" else None
+    elif body.online is not None:
+        user.last_seen = datetime.utcnow() if body.online else None
+        user.presence_status = "online" if body.online else "offline"
     db.commit()
     db.refresh(user)
     return {"user": session_user(user)}

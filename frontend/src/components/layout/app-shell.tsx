@@ -116,11 +116,22 @@ function ImpersonationBanner() {
  *  full remaining height, white background — so the conversation panels sit
  *  flush against the sidebar like Chatwoot. */
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { impersonating } = useAuth();
+  const { impersonating, user } = useAuth();
   const pathname = usePathname();
   const mainRef = useRef<HTMLElement>(null);
   const bannerActive = !!impersonating;
   const inbox = pathname.startsWith("/dashboard/tickets") || pathname.startsWith("/chat/");
+
+  // ── Presence heartbeat: ping every 30s while the app is open ──
+  useEffect(() => {
+    if (!user || user.role === "customer" || user.role === "super_admin") return;
+    const ping = () => {
+      void api.post("/agents/me/heartbeat").catch(() => {});
+    };
+    ping();
+    const interval = setInterval(ping, 30_000);
+    return () => clearInterval(interval);
+  }, [user]);
 
   useEffect(() => {
     if (mainRef.current) {

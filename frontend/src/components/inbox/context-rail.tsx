@@ -7,6 +7,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
 import { Select } from "@/components/ui/select";
 import { AutosizeTextarea } from "@/components/ui/autosize-textarea";
+import { SlaCountdown } from "@/components/ui/sla-countdown";
 import { AgentAssistPanel } from "@/components/inbox/agent-assist";
 import { AiDecisionTrail } from "./ai-decision-trail";
 import {
@@ -52,6 +53,8 @@ interface ContextRailProps {
   onResolve: (id: string) => void;
   onEscalate: (id: string) => void;
   onReopen: (id: string) => void;
+  onSnooze?: (id: string, until: string) => void;
+  onUnsnooze?: (id: string) => void;
   onAddNote: (id: string, text: string, attachments?: WidgetAttachment[]) => void;
   onEditNote: (ticketId: string, noteId: string, text: string) => void;
   onDeleteNote: (ticketId: string, noteId: string) => void;
@@ -77,6 +80,8 @@ export function ContextRail({
   onResolve,
   onEscalate,
   onReopen,
+  onSnooze,
+  onUnsnooze,
   onAddNote,
   onEditNote,
   onDeleteNote,
@@ -273,6 +278,71 @@ export function ContextRail({
               </div>
             )}
           </div>
+
+          {/* Snooze */}
+          {!resolved && !ticket.snoozedUntil && onSnooze && (
+            <div className="border-t border-border px-4 py-3">
+              <button
+                type="button"
+                onClick={() => {
+                  const d = new Date();
+                  d.setHours(d.getHours() + 2);
+                  onSnooze(ticket.id, d.toISOString());
+                }}
+                className="flex w-full items-center justify-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-2 hover:text-text"
+              >
+                <Icon name="clock" size={13} />
+                Snooze 2h
+              </button>
+            </div>
+          )}
+          {ticket.snoozedUntil && onUnsnooze && (
+            <div className="border-t border-border px-4 py-3">
+              <div className="rounded-md bg-info-soft px-3 py-2 text-center">
+                <p className="text-[11px] font-semibold text-info">
+                  <Icon name="clock" size={12} className="mr-1 inline" />
+                  Snoozed until {new Date(ticket.snoozedUntil).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onUnsnooze(ticket.id)}
+                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-2 hover:text-text"
+              >
+                <Icon name="swap" size={13} />
+                Unsnooze
+              </button>
+            </div>
+          )}
+
+          {/* CSAT */}
+          {(ticket.csatRating != null || ticket.csatComment) && (
+            <div className="border-t border-border px-4 py-3">
+              <p className={MICRO}>Customer Satisfaction</p>
+              <div className="mt-2 flex items-center gap-1.5">
+                {ticket.csatRating != null && (
+                  <div className="flex items-center gap-0.5">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Icon
+                        key={star}
+                        name="star"
+                        size={14}
+                        className={cn(
+                          star <= (ticket.csatRating ?? 0)
+                            ? "text-warning fill-warning"
+                            : "text-text-3",
+                        )}
+                      />
+                    ))}
+                  </div>
+                )}
+                <span className="text-[12px] font-semibold text-text">{ticket.csatRating}/5</span>
+              </div>
+              {ticket.csatComment && (
+                <p className="mt-1.5 text-[11.5px] text-text-2 italic">&ldquo;{ticket.csatComment}&rdquo;</p>
+              )}
+            </div>
+          )}
         </section>
         )}
 
@@ -530,6 +600,7 @@ export function ContextRail({
           </div>
         </section>
         )}
+
       </div>
     </aside>
   );

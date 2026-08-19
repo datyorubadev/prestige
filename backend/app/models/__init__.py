@@ -49,6 +49,7 @@ from app.models.custom_tool import TenantCustomTool
 from app.models.kyc import KYCDataSource, KYCRecord, KYCVerificationSession
 from app.models.doc_verify import DocVerifyTemplate, DocVerifyRecord
 from app.models.callback import CallbackSlot, CallbackBooking
+from app.models.ticket_event import TicketEvent
 
 __all__ = [
     "Role",
@@ -107,4 +108,5 @@ __all__ = [
     "DocVerifyRecord",
     "CallbackSlot",
     "CallbackBooking",
+    "TicketEvent",
 ]

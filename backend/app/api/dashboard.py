@@ -71,7 +71,7 @@ def _weekday_volume_sql(db: Db, tenant_id: str) -> list[dict]:
 
 def _leaderboard_sql(db: Db, tenant_id: str) -> list[dict]:
     """Agent leaderboard via SQL aggregation — no Python loop over tickets."""
-    users = db.query(User).filter(User.tenant_id == tenant.id, User.role != "customer").all()
+    users = db.query(User).filter(User.tenant_id == tenant_id, User.role != "customer").all()
     user_ids = [u.id for u in users]
     if not user_ids:
         return []

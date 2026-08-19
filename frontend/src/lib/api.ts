@@ -9,6 +9,7 @@ import {
 } from "@/lib/auth-store";
 import {
   demoUsers,
+  emitEvent,
   emitTyping,
   eventLog,
   mockApi,
@@ -751,6 +752,37 @@ async function mockTickets(method: string, rest: string[], body?: unknown): Prom
     }
     return updated;
   }
+  if (method === "PATCH" && rest.length >= 2 && rest[1] === "messages") {
+    const patch = (body ?? {}) as Record<string, unknown>;
+    if (typeof patch.body === "string") {
+      const ticket = mockDb.tickets.find((t) => t.id === rest[0]);
+      const msg = ticket?.msgs.find((m) => m.id === rest[2]);
+      if (msg) { msg.text = patch.body; (msg as unknown as Record<string, unknown>).edited = true; }
+      return ticket;
+    }
+  }
+  if (method === "POST" && rest.length && rest[1] === "snooze") {
+    const ticket = mockDb.tickets.find((t) => t.id === rest[0]);
+    if (ticket) { (ticket as unknown as Record<string, unknown>).snoozedUntil = (body as Record<string, unknown>)?.until ?? null; }
+    return ticket;
+  }
+  if (method === "POST" && rest.length && rest[1] === "unsnooze") {
+    const ticket = mockDb.tickets.find((t) => t.id === rest[0]);
+    if (ticket) { (ticket as unknown as Record<string, unknown>).snoozedUntil = null; }
+    return ticket;
+  }
+  if (method === "POST" && rest.length && rest[1] === "merge") {
+    const ticket = mockDb.tickets.find((t) => t.id === rest[0]);
+    const targetId = (body as Record<string, unknown>)?.target_ticket_id;
+    if (ticket && targetId) { (ticket as unknown as Record<string, unknown>).mergedIntoId = targetId; }
+    return ticket;
+  }
+  if (method === "GET" && rest.length && rest[1] === "events") {
+    return [];
+  }
+  if (method === "POST" && rest.length && rest[1] === "presence") {
+    return { ok: true };
+  }
   if (!rest.length) return mockApi.tickets();
   const ticket = await mockApi.ticket(rest[0]);
   if (rest[1] === "messages") return ticket?.msgs ?? [];
@@ -803,7 +835,27 @@ async function mockTenants(method: string, rest: string[], body?: unknown): Prom
 }
 
 async function mockAgents(method: string, rest: string[], body?: unknown): Promise<unknown> {
+  // ── Self-service presence endpoints ──
+  if (rest[0] === "me" && rest[1] === "heartbeat" && method === "POST") {
+    const userId = getSessionUser()?.id;
+    const agent = mockDb.agents.find((a) => a.id === userId);
+    if (agent) { agent.online = true; (agent as Record<string, unknown>).presenceStatus = "online"; }
+    emitEvent("agent_presence", { user_id: userId, online: true, presence_status: "online" });
+    return { ok: true, last_seen: new Date().toISOString() };
+  }
+  if (rest[0] === "me" && rest[1] === "presence" && (method === "PATCH" || method === "PUT")) {
+    const userId = getSessionUser()?.id;
+    const status = (body as Record<string, unknown>)?.status as string;
+    const agent = mockDb.agents.find((a) => a.id === userId);
+    if (agent) {
+      agent.online = status !== "offline";
+      (agent as Record<string, unknown>).presenceStatus = status;
+    }
+    emitEvent("agent_presence", { user_id: userId, online: status !== "offline", presence_status: status });
+    return { ok: true, presence_status: status };
+  }
   if (method === "POST") {
+    const { name, email, role } = (body ?? {}) as { name?: string; email?: string; role?: "agent" | "owner" };
     const { name, email, role } = (body ?? {}) as { name?: string; email?: string; role?: "agent" | "owner" };
     if (!name || !email) {
       const err = new ApiClientError("Name and email are required to invite an agent.");

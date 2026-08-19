@@ -10,6 +10,8 @@ export interface SelectOption {
   label: string;
   icon?: IconName;
   iconColor?: string;
+  /** Presence dot color — renders a small colored circle before the label. */
+  dotColor?: string;
 }
 
 interface SelectProps {
@@ -159,6 +161,7 @@ export function Select({
             className={cn("menu-item flex items-center gap-2", value === o.value && "active")}
           >
             {o.icon && <Icon name={o.icon} size={14} className={cn("shrink-0", o.iconColor)} />}
+            {o.dotColor && !o.icon && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: o.dotColor }} />}
             <span>{o.label}</span>
           </button>
         ))}
@@ -181,6 +184,7 @@ export function Select({
           {selected?.icon && (
             <Icon name={selected.icon} size={14} className={cn("shrink-0", selected.iconColor)} />
           )}
+          {selected?.dotColor && !selected?.icon && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: selected.dotColor }} />}
           <span className="truncate">{selected?.label ?? placeholder}</span>
         </span>
         <Icon name="chevron-down" size={size === "sm" ? 14 : 16} className="dd-chevron" />

@@ -10,6 +10,7 @@ from app.core.errors import TicketNotFound
 from app.core.permissions import TEAM_MANAGE, TEAM_VIEW, has_perm, require_perm
 from app.models import Invite, Tenant, TenantMember, User
 from app.models.common import InviteRole, Role
+from app.services.event_bus import publish_event
 from app.services.serializers import agent_dto
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -182,4 +183,51 @@ def set_my_scope(body: ScopeUpdate, db: Db, tenant: Tenant = Depends(get_tenant)
     membership.inbox_scope = body.inbox_scope
     db.commit()
     return _dto(db, tenant, user)
+
+
+# ── Presence / Heartbeat ───────────────────────────────────────────
+
+PRESENCE_STATUSES = ("online", "away", "busy", "offline")
+
+
+class PresenceUpdate(BaseModel):
+    status: str
+
+
+@router.post("/me/heartbeat")
+def heartbeat(db: Db, user: User = Depends(get_current_user)) -> dict:
+    """Periodic heartbeat — keeps the agent's presence signal alive."""
+    user.last_seen = datetime.utcnow()
+    if user.presence_status == "offline":
+        user.presence_status = "online"
+    db.commit()
+    publish_event("agent_presence", {
+        "user_id": user.id,
+        "user_name": user.full_name,
+        "online": True,
+        "presence_status": user.presence_status,
+    })
+    return {"ok": True, "last_seen": user.last_seen.isoformat() if user.last_seen else None}
+
+
+@router.patch("/me/presence")
+@router.put("/me/presence")
+def set_my_presence(body: PresenceUpdate, db: Db,
+                    user: User = Depends(get_current_user)) -> dict:
+    """Self-service presence status toggle (online/away/busy/offline)."""
+    if body.status not in PRESENCE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {body.status}")
+    user.presence_status = body.status
+    if body.status == "offline":
+        user.last_seen = None
+    else:
+        user.last_seen = datetime.utcnow()
+    db.commit()
+    publish_event("agent_presence", {
+        "user_id": user.id,
+        "user_name": user.full_name,
+        "online": body.status != "offline",
+        "presence_status": body.status,
+    })
+    return {"ok": True, "presence_status": user.presence_status}
 

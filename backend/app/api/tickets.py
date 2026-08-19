@@ -9,6 +9,7 @@ from app.api.deps import Db, get_tenant
 from app.core.errors import InsufficientPrivileges, TicketNotFound
 from app.core.permissions import TICKETS_MANAGE, require_perm
 from app.models import AuditLog, Customer, Label, Message, Notification, Team, Tenant, TenantMember, Ticket, User
+from app.models.ticket_event import TicketEvent
 from app.models.common import MessageSender, NotificationType, TicketStatus, TicketType
 from app.services.event_bus import publish_event
 from app.services.serializers import ensure_ticket_number, format_ticket_number, message_dto, ticket_dto, ticket_list_dto
@@ -17,8 +18,19 @@ _AGENT_ALLOWED_STATUSES = {"open", "in_progress", "waiting_for_customer", "waiti
 _CUSTOMER_ALLOWED_STATUSES = {"open", "closed"}
 
 def _check_status_transition(user_role: str, new_status: str) -> None:
-    if user_role == "agent" and new_status not in _AGENT_ALLOWED_STATUSES:
+    if user.role == "agent" and new_status not in _AGENT_ALLOWED_STATUSES:
         raise InsufficientPrivileges(f"Agents cannot set status to '{new_status}'")
+
+
+def _log_ticket_event(db, ticket, user, event_type, field=None, old_value=None, new_value=None, detail=None):
+    db.add(TicketEvent(
+        ticket_id=ticket.id, tenant_id=ticket.tenant_id,
+        actor_id=user.id, actor_name=user.full_name,
+        event_type=event_type, field=field,
+        old_value=str(old_value) if old_value is not None else None,
+        new_value=str(new_value) if new_value is not None else None,
+        detail=detail,
+    ))
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
@@ -362,11 +374,17 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
     if body.subject:
         ticket.subject = body.subject
     if body.priority and body.priority in ("low", "medium", "high"):
-        ticket.priority = body.priority
+        if body.priority != ticket.priority:
+            _log_ticket_event(db, ticket, user, "priority_changed",
+                              field="priority", old_value=ticket.priority, new_value=body.priority)
+            ticket.priority = body.priority
     if body.status and body.status in TicketStatus.__members__.values():
         if body.status != ticket.status:
             _check_status_transition(user.role, body.status)
+            old_status = ticket.status
             ticket.status = body.status
+            _log_ticket_event(db, ticket, user, "status_changed",
+                              field="status", old_value=old_status, new_value=body.status)
             db.add(Message(
                 ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
                 sender_name=user.full_name,
@@ -388,7 +406,11 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             if not new_assignee or new_assignee.tenant_id != tenant.id:
                 raise TicketNotFound("Assignee not found in this tenant")
         if ticket.assignee_id != body.assignee_id:
+            old_assignee_name = ticket.assignee.full_name if ticket.assignee else "Unassigned"
             ticket.assignee_id = body.assignee_id
+            new_name = new_assignee.full_name if new_assignee else "Unassigned"
+            _log_ticket_event(db, ticket, user, "assignee_changed",
+                              field="assignee", old_value=old_assignee_name, new_value=new_name)
             db.add(Message(
                 ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
                 sender_name=user.full_name,
@@ -490,6 +512,7 @@ def update_message(ticket_id: str, message_id: str, body: MessageUpdate, db: Db,
     if not msg or msg.ticket_id != ticket.id:
         raise TicketNotFound("Message not found")
     msg.body = body.body
+    msg.edited = True
     if body.attachments is not None:
         msg.attachments = json.dumps(body.attachments) if body.attachments else None
     db.commit()
@@ -544,4 +567,135 @@ def delete_ticket(ticket_id: str, db: Db,
     db.commit()
     publish_event("ticket_deleted", {"ticket_id": ticket_id, "tenant_id": tenant.id})
     return {"ok": True, "id": ticket_id}
+
+
+# ── Snooze / Remind ──────────────────────────────────────────────
+
+class SnoozeRequest(BaseModel):
+    until: str  # ISO datetime string
+
+
+@router.post("/{ticket_id}/snooze")
+def snooze_ticket(ticket_id: str, body: SnoozeRequest, db: Db,
+                  tenant: Tenant = Depends(get_tenant),
+                  user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    from dateutil.parser import isoparse
+    until_dt = isoparse(body.until)
+    ticket.snoozed_until = until_dt
+    _log_ticket_event(db, ticket, user, "snoozed",
+                      field="snoozed_until", new_value=body.until,
+                      detail=f"Snoozed until {until_dt.strftime('%b %d, %Y %I:%M %p')}")
+    db.add(Message(
+        ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
+        sender_name=user.full_name,
+        body=f"Snoozed until {until_dt.strftime('%b %d, %Y %I:%M %p')}",
+        is_bot=False, is_read=True,
+    ))
+    db.commit()
+    db.refresh(ticket)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    return ticket_dto(ticket)
+
+
+@router.post("/{ticket_id}/unsnooze")
+def unsnooze_ticket(ticket_id: str, db: Db,
+                    tenant: Tenant = Depends(get_tenant),
+                    user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    old = ticket.snoozed_until
+    ticket.snoozed_until = None
+    _log_ticket_event(db, ticket, user, "unsnoozed",
+                      field="snoozed_until", old_value=str(old) if old else None, new_value=None)
+    db.commit()
+    db.refresh(ticket)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    return ticket_dto(ticket)
+
+
+# ── Merge ────────────────────────────────────────────────────────
+
+class MergeRequest(BaseModel):
+    primary_ticket_id: str
+
+
+@router.post("/{ticket_id}/merge")
+def merge_ticket(ticket_id: str, body: MergeRequest, db: Db,
+                 tenant: Tenant = Depends(get_tenant),
+                 user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    primary = _get_scoped_ticket(db, tenant, body.primary_ticket_id)
+    if ticket.id == primary.id:
+        raise TicketNotFound("Cannot merge a ticket into itself")
+    # Move messages from secondary to primary
+    for msg in ticket.messages:
+        msg.ticket_id = primary.id
+    # Transfer labels
+    for lbl in ticket.labels:
+        if lbl not in primary.labels:
+            primary.labels.append(lbl)
+    ticket.merged_into_id = primary.id
+    ticket.status = "closed"
+    _log_ticket_event(db, primary, user, "ticket_merged",
+                      detail=f"Ticket {format_ticket_number(ticket)} merged into this ticket")
+    db.add(Message(
+        ticket_id=primary.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
+        sender_name=user.full_name,
+        body=f"Ticket {format_ticket_number(ticket)} was merged into this conversation",
+        is_bot=False, is_read=True,
+    ))
+    db.commit()
+    db.refresh(primary)
+    publish_event("ticket_updated", {"ticket_id": primary.id, "status": primary.status})
+    return ticket_dto(primary)
+
+
+# ── Activity Timeline ────────────────────────────────────────────
+
+@router.get("/{ticket_id}/events")
+def get_ticket_events(ticket_id: str, db: Db,
+                      tenant: Tenant = Depends(get_tenant),
+                      user: User = Depends(require_perm(TICKETS_MANAGE))) -> list[dict]:
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    events = (
+        db.query(TicketEvent)
+        .filter(TicketEvent.ticket_id == ticket.id)
+        .order_by(TicketEvent.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": e.id,
+            "eventType": e.event_type,
+            "field": e.field,
+            "oldValue": e.old_value,
+            "newValue": e.new_value,
+            "detail": e.detail,
+            "actorName": e.actor_name,
+            "actorId": e.actor_id,
+            "createdAt": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in events
+    ]
+
+
+# ── Agent Collision / Presence ───────────────────────────────────
+
+class PresenceRequest(BaseModel):
+    action: str  # "enter" or "leave"
+
+
+@router.post("/{ticket_id}/presence")
+def ticket_presence(ticket_id: str, body: PresenceRequest, db: Db,
+                    tenant: Tenant = Depends(get_tenant),
+                    user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
+    ticket = _get_scoped_ticket(db, tenant, ticket_id)
+    publish_event("ticket_presence", {
+        "ticket_id": ticket.id,
+        "user_id": user.id,
+        "user_name": user.full_name,
+        "action": body.action,
+    })
+    return {"ok": True}
 

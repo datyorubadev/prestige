@@ -70,7 +70,15 @@ export function AgentsManager() {
     load();
   }, []);
 
-  useRealtime({ agents_changed: () => load() });
+  useRealtime({
+    agents_changed: () => load(),
+    agent_presence: (ev) => {
+      const userId = String(ev.data?.user_id ?? "");
+      const online = Boolean(ev.data?.online);
+      const presenceStatus = ev.data?.presence_status as string | undefined;
+      setAgents((prev) => prev?.map((a) => a.id === userId ? { ...a, online, ...(presenceStatus ? { presenceStatus: presenceStatus as AgentUser["presenceStatus"] } : {}) } : a) ?? null);
+    },
+  });
 
   const resend = async (a: AgentUser) => {
     setBusy(true);
@@ -140,7 +148,7 @@ export function AgentsManager() {
   };
 
   const activeCount = agents?.filter((a) => !a.invitePending && a.active !== false).length ?? 0;
-  const onlineCount = agents?.filter((a) => a.online).length ?? 0;
+  const onlineCount = agents?.filter((a) => (a.presenceStatus ?? (a.online ? "online" : "offline")) === "online").length ?? 0;
 
   const filteredAgents = (agents ?? []).filter(
     (a) =>
@@ -421,7 +429,11 @@ function AgentsTable({
         accessorKey: "online",
         header: "Presence",
         enableSorting: false,
-        cell: ({ row }) => <Pill status={row.original.online ? "online" : "offline"} dot />,
+        cell: ({ row }) => {
+          const status = row.original.presenceStatus ?? (row.original.online ? "online" : "offline");
+          const tone = status === "online" ? "success" : status === "away" ? "warning" : status === "busy" ? "danger" : "neutral";
+          return <Pill status={status} dot tone={tone} />;
+        },
       },
       {
         accessorKey: "tickets",
