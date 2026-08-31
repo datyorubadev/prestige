@@ -52,6 +52,16 @@ def initials_of(name: str) -> str:
 
 
 def session_user(user: User) -> dict:
+    tz = None
+    try:
+        if user.tenant_id:
+            from app.database import SessionLocal
+            from app.models import Tenant
+            with SessionLocal() as _db:
+                t = _db.get(Tenant, user.tenant_id)
+                tz = getattr(t, "timezone", None)
+    except Exception:
+        tz = None
     return {
         "id": user.id,
         "email": user.email,
@@ -60,6 +70,7 @@ def session_user(user: User) -> dict:
         "tenantId": user.tenant_id,
         "initials": initials_of(user.full_name),
         "color": user.color,
+        "timezone": tz or "Africa/Lagos",
     }
 
 
@@ -222,6 +233,7 @@ def _ticket_base(ticket: Ticket, now: datetime | None = None) -> dict:
         "csatComment": ticket.csat_comment,
         "snoozedUntil": ticket.snoozed_until.isoformat() if getattr(ticket, "snoozed_until", None) else None,
         "mergedIntoId": getattr(ticket, "merged_into_id", None),
+        "aiPaused": bool(getattr(ticket, "ai_paused", False)),
     }
 
 
@@ -277,6 +289,7 @@ def tenant_dto(tenant: Tenant) -> dict:
         "color": tenant.primary_color,
         "tone": tenant.brand_tone,
         "city": tenant.city,
+        "timezone": getattr(tenant, "timezone", None) or "Africa/Lagos",
         "botName": tenant.bot_name,
         "logoUrl": tenant.logo_url,
         "displayImage": getattr(tenant, "display_image", None),

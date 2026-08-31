@@ -1,12 +1,17 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.api.deps import Db, get_current_user, get_tenant, require_admin, require_team
+from app.api.deps import Db, get_current_user, get_optional_user, get_tenant, require_admin, require_team
+from app.api.portal import _enforce_identity
 from app.core.errors import ApiError, TicketNotFound
 from app.core.permissions import KB_MANAGE, require_perm
 from app.core.security import hash_password
 from app.models import CannedResponse, Customer, KbArticle, Message, Tenant, Ticket, User
+from app.models.knowledge import KnowledgeSource
 from app.services.serializers import article_dto, canned_dto, format_ticket_number, session_user
+from app.services.tz import fmt_in_tz
 
 router = APIRouter(tags=["kb"])
 
@@ -296,7 +301,14 @@ class PastTicketsRequest(BaseModel):
 
 
 @router.post("/past-tickets")
-def past_tickets(body: PastTicketsRequest, db: Db) -> list[dict]:
+def past_tickets(
+    body: PastTicketsRequest,
+    db: Db,
+    user: User | None = Depends(get_optional_user),
+) -> list[dict]:
+    """Past ticket lookup — anonymous like the rest of the customer portal
+    (widget / embed flow); an authenticated caller must match the requested
+    identity (see portal._enforce_identity)."""
     tid = body.tenantId or body.tenant_id
     email = body.email.strip().lower() if body.email else ""
     if not tid:
@@ -305,11 +317,19 @@ def past_tickets(body: PastTicketsRequest, db: Db) -> list[dict]:
             "tenant_id is required to scope past-ticket lookups",
             400,
         )
-    if not email:
-        return []
-
     # Find tenant by ID or slug
     tenant_obj = db.get(Tenant, tid) or db.query(Tenant).filter(Tenant.slug == tid.lower()).first()
+    if user is not None:
+        if getattr(user.role, "value", user.role) == "customer":
+            # Signed-in customer: strict identity rules (see portal._enforce_identity)
+            if tenant_obj is not None:
+                _enforce_identity(tenant_obj, email, user)
+        elif getattr(user.role, "value", user.role) != "super_admin":
+            # Team member: own tenant only
+            if user.tenant_id != tid:
+                raise ApiError("FORBIDDEN", "Cannot query past tickets for another tenant", 403)
+    if not email:
+        return []
 
     query = db.query(Customer).filter(Customer.email.ilike(email))
     if tenant_obj:
@@ -332,7 +352,7 @@ def past_tickets(body: PastTicketsRequest, db: Db) -> list[dict]:
             "ticketNumber": format_ticket_number(t),
             "subject": t.subject,
             "status": str(t.status.value if hasattr(t.status, "value") else t.status),
-            "date": t.created_at.strftime("%b %d") if t.created_at else (t.resolved_at.strftime("%b %d") if t.resolved_at else "Recent"),
+            "date": fmt_in_tz(t.created_at, "%b %d", tenant_obj) if t.created_at else (fmt_in_tz(t.resolved_at, "%b %d", tenant_obj) if t.resolved_at else "Recent"),
             "channel": t.channel or "widget",
             "priority": str(t.priority.value if hasattr(t.priority, "value") else t.priority),
         }
@@ -440,3 +460,62 @@ def auto_discover_faqs(
         "discovered": discovered_count,
         "articles": [article_dto(a) for a in new_articles],
     }
+
+
+# ---------------------------------------------------------------- export/import
+
+@router.get("/export")
+def export_knowledge_base(db: Db, tenant: Tenant = Depends(get_tenant),
+                          user: User = Depends(require_perm(KB_MANAGE))) -> dict:
+    """Export all knowledge sources + articles as a portable JSON bundle."""
+    sources = db.query(KnowledgeSource).filter(KnowledgeSource.tenant_id == tenant.id).all()
+    articles = db.query(KbArticle).filter(KbArticle.tenant_id == tenant.id).all()
+    return {
+        "version": 1,
+        "tenantId": tenant.id,
+        "exportedAt": datetime.utcnow().isoformat(),
+        "sources": [
+            {"id": s.id, "name": s.name, "url": s.url, "type": s.source_type,
+             "createdAt": s.created_at.isoformat() if s.created_at else None}
+            for s in sources
+        ],
+        "articles": [
+            {"id": a.id, "title": a.title, "body": a.body, "status": a.status,
+             "tags": a.tags, "createdAt": a.created_at.isoformat() if a.created_at else None}
+            for a in articles
+        ],
+        "stats": {"sources": len(sources), "articles": len(articles)},
+    }
+
+
+class ZendeskImportRequest(BaseModel):
+    articles: list[dict] = []
+
+
+@router.post("/import")
+def import_knowledge_base(body: ZendeskImportRequest, db: Db,
+                          tenant: Tenant = Depends(get_tenant),
+                          user: User = Depends(require_perm(KB_MANAGE))) -> dict:
+    """Import articles from a Zendesk-compatible JSON export."""
+    imported = 0
+    skipped = 0
+    for item in body.articles:
+        title = (item.get("title") or "").strip()
+        body_text = item.get("body") or item.get("description") or ""
+        if not title or not body_text:
+            skipped += 1
+            continue
+        existing = db.query(KbArticle).filter(
+            KbArticle.tenant_id == tenant.id, KbArticle.title == title
+        ).first()
+        if existing:
+            existing.body = body_text
+        else:
+            db.add(KbArticle(
+                tenant_id=tenant.id, title=title, body=body_text,
+                status="draft", tags=item.get("tags") or "",
+                created_by=user.id,
+            ))
+        imported += 1
+    db.commit()
+    return {"ok": True, "imported": imported, "skipped": skipped}

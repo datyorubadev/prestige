@@ -25,6 +25,7 @@ export function toneForStatus(status: string): PillTone {
     case "warn":
     case "trial":
     case "waiting_for_customer":
+    case "away":
       return "warning";
     case "escalated":
     case "high":
@@ -32,6 +33,7 @@ export function toneForStatus(status: string): PillTone {
     case "suspended":
     case "over":
     case "past_due":
+    case "busy":
       return "danger";
     case "info":
     case "medium":
@@ -40,6 +42,7 @@ export function toneForStatus(status: string): PillTone {
     case "in_progress":
       return "info";
     case "waiting_internal":
+    case "offline":
       return "neutral";
     case "violet":
       return "violet";

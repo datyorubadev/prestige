@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_
 
+import json
 from pydantic import BaseModel
 
 from app.api.deps import Db, get_optional_user
@@ -125,16 +126,19 @@ def portal_create_ticket(body: PortalTicketCreate, db: Db,
     db.add(ticket)
     db.flush()
     ticket_text = body.text.strip() or "No details provided."
-    db.add(Message(
+    portal_msg = Message(
         ticket_id=ticket.id, sender_id=None, sender_type=MessageSender.CUSTOMER,
         sender_name=customer.full_name or email, body=ticket_text,
         is_bot=False, is_read=True,
         attachments=json.dumps(body.attachments) if body.attachments else None,
-    ))
+    )
+    db.add(portal_msg)
     db.commit()
+    db.refresh(portal_msg)
     publish_event("ticket_created", {"ticket_id": ticket.id, "email": email})
     publish_event("message_created", {
         "ticket_id": ticket.id,
+        "message_id": portal_msg.id,
         "who": "customer",
         "text": ticket_text,
         "attachments": body.attachments or [],
@@ -270,8 +274,10 @@ def portal_reply_ticket(ticket_id: str, body: PortalReplyRequest, db: Db,
     )
     db.add(msg)
     db.commit()
+    db.refresh(msg)
     publish_event("message_created", {
         "ticket_id": ticket.id,
+        "message_id": msg.id,
         "who": "customer",
         "text": text,
         "attachments": body.attachments or [],
@@ -319,3 +325,88 @@ def portal_csat_ticket(ticket_id: str, body: PortalCsatRequest, db: Db,
     db.refresh(ticket)
     publish_event("ticket_updated", {"ticket_id": ticket.id, "csat": ticket.csat_rating})
     return ticket_dto(ticket)
+
+
+# ── Customer Profile ──────────────────────────────────────────────
+
+class PortalProfileUpdate(BaseModel):
+    full_name: str | None = None
+    phone: str | None = None
+
+
+@router.get("/profile")
+def portal_get_profile(db: Db, user: User = Depends(get_optional_user)) -> dict:
+    """Return the current customer's profile (name, email, phone)."""
+    if not user:
+        raise InsufficientPrivileges("Authentication required")
+    customer = db.query(Customer).filter(
+        Customer.tenant_id == user.tenant_id,
+        Customer.email == user.email,
+    ).first()
+    return {
+        "id": user.id,
+        "email": user.email or "",
+        "fullName": user.full_name or "",
+        "phone": customer.phone_number if customer else "",
+    }
+
+
+@router.post("/profile")
+def portal_update_profile(body: PortalProfileUpdate, db: Db,
+                          user: User = Depends(get_optional_user)) -> dict:
+    """Update the current customer's name and phone."""
+    if not user:
+        raise InsufficientPrivileges("Authentication required")
+    if body.full_name is not None:
+        user.full_name = body.full_name.strip()
+    customer = db.query(Customer).filter(
+        Customer.tenant_id == user.tenant_id,
+        Customer.email == user.email,
+    ).first()
+    if customer and body.phone is not None:
+        customer.phone_number = body.phone.strip() or None
+    db.commit()
+    return {"ok": True, "fullName": user.full_name, "phone": customer.phone_number if customer else ""}
+
+
+class PortalPasswordChange(BaseModel):
+    password: str
+
+
+@router.post("/profile/password")
+def portal_change_password(body: PortalPasswordChange, db: Db,
+                           user: User = Depends(get_optional_user)) -> dict:
+    """Change the current customer's password."""
+    if not user:
+        raise InsufficientPrivileges("Authentication required")
+    from app.core.security import hash_password
+    if len(body.password) < 6:
+        raise ApiError("VALIDATION_ERROR", "Password must be at least 6 characters.", 400)
+    user.password_hash = hash_password(body.password)
+    db.commit()
+    return {"ok": True}
+
+
+class PortalDeletionRequest(BaseModel):
+    reason: str = ""
+
+
+@router.post("/request-deletion")
+def portal_request_deletion(body: PortalDeletionRequest, db: Db,
+                            user: User = Depends(get_optional_user)) -> dict:
+    """Submit an account deletion request."""
+    if not user:
+        raise InsufficientPrivileges("Authentication required")
+    from app.models.settings import DeletionRequest
+    from app.models import RefreshToken
+    db.add(DeletionRequest(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        reason=body.reason or "Customer requested from portal",
+    ))
+    db.query(RefreshToken).filter(RefreshToken.user_id == user.id).update(
+        {RefreshToken.revoked: True}
+    )
+    user.is_active = False
+    db.commit()
+    return {"ok": True}

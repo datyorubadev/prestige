@@ -8,6 +8,7 @@ python-multipart
 bcrypt>=4
 PyJWT
 python-dotenv
+tzdata
 httpx
 slowapi
 redis
@@ -26,6 +27,10 @@ chromadb>=1.5
 apscheduler
 pytest
 pytest-asyncio
+pyotp
+qrcode
+pillow
+sentry-sdk[fastapi]
 
 # Vector DB — pgvector (recommended for production)
 # Requires PostgreSQL with pgvector extension installed

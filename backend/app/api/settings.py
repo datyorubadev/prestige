@@ -544,6 +544,15 @@ def update_tenant_settings(payload: dict, db: Db, tenant: Tenant = Depends(get_t
         tenant.ai_system_prompt = str(payload["aiSystemPrompt"]) if payload["aiSystemPrompt"] else None
     if "primaryColor" in payload or "color" in payload:
         tenant.primary_color = str(payload.get("primaryColor") or payload.get("color"))
+    if "escalationMessage" in payload:
+        tenant.escalation_message = str(payload["escalationMessage"])
+    if "timezone" in payload:
+        from zoneinfo import ZoneInfo
+        try:
+            ZoneInfo(str(payload["timezone"]))
+            tenant.timezone = str(payload["timezone"])
+        except Exception:
+            raise HTTPException(status_code=422, detail="Invalid IANA timezone")
     db.commit()
     db.refresh(tenant)
     from app.services.serializers import tenant_dto

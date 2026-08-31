@@ -210,16 +210,31 @@ def run_worker(poll_interval: float = 1.0) -> None:
 @register_task("kb.ingest")
 def _task_kb_ingest(tenant_id: str = "", source_id: str = "", **kwargs) -> None:
     """Background KB ingestion — embedding is CPU-heavy."""
-    from app.infra.vector_store import get_vector_store
     from app.database import SessionLocal
-    from app.models import KnowledgeSource, Tenant
+    from app.models import KnowledgeSource
 
     db = SessionLocal()
     try:
         source = db.get(KnowledgeSource, source_id)
         if not source:
             return
-        # ... actual ingestion logic (delegates to existing knowledge service)
+        from app.services.vector_store import add_docs
+        from app.services.ingestion import split_text
+
+        text = source.text or ""
+        if not text.strip():
+            return
+        chunks = split_text(text, chunk_size=500)
+        if not chunks:
+            return
+        ids = [f"{source_id}_{i}" for i in range(len(chunks))]
+        metas = [{"source_id": source_id, "chunk": i} for i in range(len(chunks))]
+        add_docs(tenant_id, ids, chunks, metas)
+        source.chunk_count = len(chunks)
+        source.status = "ready"
+        db.commit()
+    except Exception:
+        db.rollback()
     finally:
         db.close()
 
@@ -239,8 +254,54 @@ def _task_sla_sweep(tenant_id: str = "", **kwargs) -> None:
 
 @register_task("usage.aggregate")
 def _task_usage_aggregate(tenant_id: str = "", **kwargs) -> None:
-    """Aggregate AI token usage for a tenant."""
-    pass  # Placeholder — implement when usage tracking scales
+    """Log daily AI token usage snapshot for a tenant."""
+    from datetime import datetime
+    from app.database import SessionLocal
+    from app.models import Tenant
+
+    db = SessionLocal()
+    try:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            return
+        logger.info(
+            "Usage snapshot for %s: tokens_used=%d, tokens_limit=%d",
+            tenant_id, tenant.ai_tokens_used, tenant.ai_tokens_limit,
+        )
+    finally:
+        db.close()
+
+
+@register_task("trial.sweep")
+def _task_trial_sweep(**kwargs) -> None:
+    """Downgrade tenants whose trial has expired.
+
+    Runs periodically via the task queue or can be triggered manually.
+    """
+    from datetime import datetime
+    from app.database import SessionLocal
+    from app.models.plan import Subscription
+
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        expired = (
+            db.query(Subscription)
+            .filter(
+                Subscription.status == "trial",
+                Subscription.trial_ends_at.isnot(None),
+                Subscription.trial_ends_at < now,
+            )
+            .all()
+        )
+        for sub in expired:
+            sub.status = "expired"
+            logger.info("Trial expired for subscription %s (tenant %s)", sub.id, sub.tenant_id)
+        if expired:
+            db.commit()
+            logger.info("Trial sweep: %d subscriptions expired", len(expired))
+    finally:
+        db.close()
 
 
 # ── Queue stats ─────────────────────────────────────────────────────

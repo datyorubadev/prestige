@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
 import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
@@ -10,6 +10,9 @@ import { MentionText } from "@/components/ui/mention-text";
 import { InlineAttachments } from "@/components/ui/attachments";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { avatarColorFor, cn, isResolved, ticketNumberFor } from "@/lib/utils";
+import { fmtDate, fmtTime, fmtWeekday } from "@/lib/time";
+import { useRealtime } from "@/lib/realtime";
+import { useAgentAssist, type AgentAssistPending } from "@/hooks/useAgentAssist";
 import type {
   AgentUser,
   CannedResponse,
@@ -66,15 +69,12 @@ function dayLabel(ts?: string): string {
   const diff = Math.round((todayStart - dayStart) / 86_400_000);
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
-  if (diff > 1 && diff < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (diff > 1 && diff < 7) return fmtWeekday(ts);
+  return fmtDate(ts);
 }
 
 function timeOfDay(ts?: string): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return fmtTime(ts);
 }
 
 function receiptLabel(status?: TicketMessage["status"]): string {
@@ -115,12 +115,17 @@ export function ConversationPane({
 }: ConversationPaneProps) {
   const [quote, setQuote] = useState<TicketMessage["replyTo"] | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [approvalPending, setApprovalPending] = useState<AgentAssistPending | null>(null);
+  const [approvalWorking, setApprovalWorking] = useState(false);
+  const [assistDraft, setAssistDraft] = useState("");
+  const [assistSending, setAssistSending] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const { fetchPending, approve, answer } = useAgentAssist();
 
   useEffect(() => {
     const el = threadRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [ticket?.id, ticket?.msgs.length, typing]);
+  }, [ticket?.id, ticket?.msgs.length, typing, approvalPending]);
 
   const uniqueMsgs = useMemo(() => {
     const raw = ticket?.msgs ?? [];
@@ -143,6 +148,66 @@ export function ConversationPane({
     }
     return filtered;
   }, [ticket?.msgs]);
+
+  const refreshApproval = useCallback(async () => {
+    if (!ticket) return;
+    const res = await fetchPending(ticket.id);
+    setApprovalPending(res?.pending ? (res.payload ?? null) : null);
+  }, [ticket, fetchPending]);
+
+  useRealtime({
+    agent_approval_pending: (ev) => {
+      if (ticket && ev.data?.ticket_id === ticket.id) void refreshApproval();
+    },
+    agent_approval_resolved: (ev) => {
+      if (ticket && ev.data?.ticket_id === ticket.id) {
+        setApprovalPending(null);
+        void refreshApproval();
+      }
+    },
+    human_assist_pending: (ev) => {
+      if (ticket && ev.data?.ticket_id === ticket.id) void refreshApproval();
+    },
+    human_assist_resolved: (ev) => {
+      if (ticket && ev.data?.ticket_id === ticket.id) {
+        setApprovalPending(null);
+        setAssistDraft("");
+        void refreshApproval();
+      }
+    },
+  });
+
+  const handleAssistAnswer = useCallback(async () => {
+    if (!ticket || !assistDraft.trim()) return;
+    setAssistSending(true);
+    try {
+      await answer(ticket.id, assistDraft.trim());
+      setApprovalPending(null);
+      setAssistDraft("");
+      void refreshApproval();
+    } finally {
+      setAssistSending(false);
+    }
+  }, [ticket, assistDraft, answer, refreshApproval]);
+
+  const handleApproval = useCallback(
+    async (approved: boolean) => {
+      if (!ticket || !approvalPending) return;
+      setApprovalWorking(true);
+      try {
+        await approve(ticket.id, approved);
+        setApprovalPending(null);
+        void refreshApproval();
+      } finally {
+        setApprovalWorking(false);
+      }
+    },
+    [ticket, approvalPending, approve, refreshApproval],
+  );
+
+  useEffect(() => {
+    if (ticket) void refreshApproval();
+  }, [ticket?.id, refreshApproval]);
 
   if (!ticket) {
     return (
@@ -184,7 +249,7 @@ export function ConversationPane({
   };
 
   const quoteFor = (m: TicketMessage): TicketMessage["replyTo"] => ({
-    author: m.who === "customer" ? ticket.cust : m.who === "ai_bot" ? "AI assistant" : m.author || ticket.assignee || agentName,
+    author: m.who === "customer" ? ticket.cust : m.who === "ai_bot" || m.who === "ai" ? "AI assistant" : m.author || ticket.assignee || agentName,
     text: m.text,
   });
 
@@ -229,7 +294,7 @@ export function ConversationPane({
           onChange={(e) => setSearchQuery(e.target.value)}
           placeholder="Search in conversation…"
           aria-label="Search in conversation"
-          className="focus-ring-soft w-full bg-transparent text-[12px] text-text placeholder:text-text-3"
+          className="w-full bg-transparent text-[12px] text-text placeholder:text-text-3 outline-none"
         />
         {searchQuery && (
           <button
@@ -286,6 +351,94 @@ export function ConversationPane({
               <span className="typing-dot" />
             </div>
           </div>
+        )}
+
+        {approvalPending?.type === "human_assist" ? (
+          <div className="rounded-md border border-primary-border bg-primary-soft px-3.5 py-3">
+            <div className="flex items-center gap-1.5">
+              <Icon name="sparkles" size={13} className="text-primary" />
+              <p className="text-[11px] font-bold uppercase tracking-wide text-primary">
+                Needs your answer
+              </p>
+            </div>
+            <p className="mt-1.5 text-[11.5px] text-text-2">
+              This question isn&apos;t in our knowledge base —{" "}
+              <span className="font-semibold text-text">you answer, the bot relays it</span>{" "}
+              to the customer.
+            </p>
+            {approvalPending.question && (
+              <div className="mt-2 rounded-sm border border-primary-border/60 bg-white px-3 py-2">
+                <p className="text-[10.5px] font-bold uppercase tracking-wide text-text-3">
+                  Customer asked
+                </p>
+                <p className="mt-0.5 text-[12px] leading-relaxed text-text">
+                  &ldquo;{approvalPending.question}&rdquo;
+                </p>
+              </div>
+            )}
+            <textarea
+              value={assistDraft}
+              onChange={(e) => setAssistDraft(e.target.value)}
+              rows={3}
+              placeholder="Type the answer the agent should send…"
+              className="mt-2 w-full resize-none rounded-sm border border-border bg-white px-3 py-2 text-[12.5px] text-text outline-none placeholder:text-text-3 focus:border-primary"
+            />
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => void handleAssistAnswer()}
+                disabled={assistSending || !assistDraft.trim()}
+                className="inline-flex items-center justify-center gap-1 rounded-sm bg-primary px-3 py-1.5 text-[11.5px] font-semibold text-white transition-colors duration-150 hover:bg-primary-dark disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="send" size={12} />
+                Send answer
+              </button>
+            </div>
+          </div>
+        ) : (
+          approvalPending && (
+          <div className="rounded-md border border-warning-border bg-warning-soft px-3.5 py-3">
+            <div className="flex items-center gap-1.5">
+              <Icon name="shield" size={13} className="text-warning" />
+              <p className="text-[11px] font-bold uppercase tracking-wide text-warning">
+                Approval needed
+              </p>
+            </div>
+            <p className="mt-1.5 text-[12px] font-semibold text-text">
+              {approvalPending.prompt ?? "Approve this action?"}
+            </p>
+            {approvalPending.type && (
+              <p className="mt-0.5 text-[10.5px] font-bold uppercase tracking-wide text-warning-dark">
+                {approvalPending.type}
+              </p>
+            )}
+            {approvalPending.customer_reply && (
+              <p className="mt-1.5 text-[11.5px] leading-relaxed text-text-2">
+                Told the customer: &ldquo;{approvalPending.customer_reply}&rdquo;
+              </p>
+            )}
+            <div className="mt-2.5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleApproval(true)}
+                disabled={approvalWorking}
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-sm bg-primary px-3 py-1.5 text-[11.5px] font-semibold text-white transition-colors duration-150 hover:bg-primary-dark disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="check" size={12} />
+                Approve
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleApproval(false)}
+                disabled={approvalWorking}
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-sm border border-danger-border px-3 py-1.5 text-[11.5px] font-semibold text-danger transition-colors duration-150 hover:bg-danger-soft disabled:opacity-50 cursor-pointer"
+              >
+                <Icon name="close" size={12} />
+                Decline
+              </button>
+            </div>
+          </div>
+          )
         )}
       </div>
 
@@ -424,7 +577,7 @@ function MessageBubble({
     );
   }
 
-  if (message.who === "ai_bot") {
+  if (message.who === "ai_bot" || message.who === "ai") {
     return (
       <div className="group relative flex items-end gap-2">
         <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-info-soft text-info">
@@ -459,7 +612,7 @@ function MessageBubble({
         onCopy={onCopy}
         onQuote={onQuote}
         onDelete={() => message.id && onDeleteMessage(ticket.id, message.id)}
-        onEdit={onEditMessage && message.id ? () => onEditMessage(ticket.id, message.id!, message.text) : undefined}
+        onEdit={onEditMessage && message.id ? (text: string) => onEditMessage(ticket.id, message.id!, text) : undefined}
         highlightText={highlightText}
       />
     );
@@ -603,14 +756,14 @@ function AgentMessageBubble({
   onCopy: () => void;
   onQuote: () => void;
   onDelete: () => void;
-  onEdit?: () => void;
+  onEdit?: (text: string) => void;
   highlightText?: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(message.text);
 
   const handleSave = () => {
-    onEdit?.();
+    onEdit?.(editValue);
     setEditing(false);
   };
 

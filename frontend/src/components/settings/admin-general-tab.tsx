@@ -30,11 +30,32 @@ export function AdminGeneralTab() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    api
+      .get<any>("/settings/tenant")
+      .then((data) => {
+        if (!active || !data) return;
+        if (data.escalationMessage) setDefEscalation(data.escalationMessage);
+        if (data.tone) setDefTone(data.tone);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
   const save = async () => {
     setSaving(true);
-    await new Promise((r) => setTimeout(r, 120));
-    setSaving(false);
-    toast("Platform defaults saved & broadcast live");
+    try {
+      await api.put("/settings/tenant", {
+        escalationMessage: defEscalation,
+        tone: defTone,
+      });
+      toast("Platform defaults saved & broadcast live");
+    } catch {
+      toast("Could not save platform defaults", "danger");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const activeTenants = tenants.filter((t) => t.status === "active").length;

@@ -839,8 +839,9 @@ async function mockAgents(method: string, rest: string[], body?: unknown): Promi
   if (rest[0] === "me" && rest[1] === "heartbeat" && method === "POST") {
     const userId = getSessionUser()?.id;
     const agent = mockDb.agents.find((a) => a.id === userId);
-    if (agent) { agent.online = true; (agent as Record<string, unknown>).presenceStatus = "online"; }
-    emitEvent("agent_presence", { user_id: userId, online: true, presence_status: "online" });
+    if (agent) { agent.online = true; (agent as unknown as Record<string, unknown>).presenceStatus = "online"; }
+    const agentsOnline = mockDb.agents.filter((a) => (a.presenceStatus ?? (a.online ? "online" : "offline")) === "online").length;
+    emitEvent("agent_presence", { user_id: userId, online: true, presence_status: "online", agents_online: agentsOnline });
     return { ok: true, last_seen: new Date().toISOString() };
   }
   if (rest[0] === "me" && rest[1] === "presence" && (method === "PATCH" || method === "PUT")) {
@@ -849,13 +850,13 @@ async function mockAgents(method: string, rest: string[], body?: unknown): Promi
     const agent = mockDb.agents.find((a) => a.id === userId);
     if (agent) {
       agent.online = status !== "offline";
-      (agent as Record<string, unknown>).presenceStatus = status;
+      (agent as unknown as Record<string, unknown>).presenceStatus = status;
     }
-    emitEvent("agent_presence", { user_id: userId, online: status !== "offline", presence_status: status });
+    const agentsOnline = mockDb.agents.filter((a) => (a.presenceStatus ?? (a.online ? "online" : "offline")) === "online").length;
+    emitEvent("agent_presence", { user_id: userId, online: status !== "offline", presence_status: status, agents_online: agentsOnline });
     return { ok: true, presence_status: status };
   }
-  if (method === "POST") {
-    const { name, email, role } = (body ?? {}) as { name?: string; email?: string; role?: "agent" | "owner" };
+  if (method === "POST" && rest.length === 0) {
     const { name, email, role } = (body ?? {}) as { name?: string; email?: string; role?: "agent" | "owner" };
     if (!name || !email) {
       const err = new ApiClientError("Name and email are required to invite an agent.");
@@ -866,6 +867,7 @@ async function mockAgents(method: string, rest: string[], body?: unknown): Promi
   }
   if (rest.length && method === "POST") {
     if (rest[1] === "resend") return mockApi.resendInvite(rest[0]);
+    if (rest[1] === "revoke-invite") return mockApi.revokeInvite(rest[0]);
   }
   if (rest.length && method === "DELETE") {
     const { active } = (body ?? {}) as { active?: boolean };

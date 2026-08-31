@@ -1,6 +1,7 @@
 import sys
 import os
 
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "__all__")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import uvicorn

@@ -226,12 +226,13 @@ def refresh(body: RefreshRequest, db: Db) -> dict:
     if not user or not user.is_active:
         raise InvalidCredentials("Account disabled")
     token_type = payload.get("type")
-    if token_type == "refresh":
-        stored = db.query(RefreshToken).filter(
-            RefreshToken.token == body.refresh_token, RefreshToken.revoked.is_(False)
-        ).first()
-        if not stored:
-            raise InvalidCredentials("Refresh token has been revoked")
+    if token_type != "refresh":
+        raise InvalidCredentials("Invalid token type — only refresh tokens accepted")
+    stored = db.query(RefreshToken).filter(
+        RefreshToken.token == body.refresh_token, RefreshToken.revoked.is_(False)
+    ).first()
+    if not stored:
+        raise InvalidCredentials("Refresh token has been revoked")
     if user.role in ("owner", "agent"):
         user.tenant_id = _active_tenant_id(db, user)
     access = create_access_token(user.id, user.role, user.tenant_id)
@@ -268,7 +269,7 @@ def forgot_password(body: ForgotPasswordRequest, db: Db) -> dict:
         else:
             # real SMTP send would go here via email_service
             logger.info("reset requested for %s", body.email)
-        return {"ok": True, "token": token}
+        return {"ok": True}
     return {"ok": True}
 
 
@@ -327,24 +328,34 @@ def accept_invite(body: AcceptInviteRequest, db: Db) -> dict:
     invite = db.query(Invite).filter(Invite.token == body.invite_token).first()
     if not invite or not invite.is_active:
         raise InviteExpired()
-    if db.query(User).filter(User.email == invite.email).first():
-        raise InvalidCredentials("An account with this email already exists")
-    user = User(
-        tenant_id=invite.tenant_id,
-        email=invite.email,
-        password_hash=hash_password(body.password),
-        full_name=body.full_name,
-        role=invite.role,
-        is_active=True,
-    )
+    # Find the existing pending user created when the invite was sent
+    user = db.query(User).filter(
+        User.email == invite.email, User.tenant_id == invite.tenant_id,
+    ).first()
+    if user:
+        # Activate the existing pending user
+        user.password_hash = hash_password(body.password)
+        user.full_name = body.full_name
+        user.is_active = True
+        user.last_seen = datetime.utcnow()
+    else:
+        # No pending user (e.g. legacy invite) — create one
+        user = User(
+            tenant_id=invite.tenant_id,
+            email=invite.email,
+            password_hash=hash_password(body.password),
+            full_name=body.full_name,
+            role=invite.role,
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+        if invite.role in (Role.OWNER, Role.AGENT):
+            db.add(TenantMember(
+                tenant_id=invite.tenant_id, user_id=user.id,
+                role=invite.role, status="active", inbox_scope="all",
+            ))
     invite.is_active = False
-    db.add(user)
-    db.flush()
-    if invite.role in (Role.OWNER, Role.AGENT):
-        db.add(TenantMember(
-            tenant_id=invite.tenant_id, user_id=user.id,
-            role=invite.role, status="active", inbox_scope="all",
-        ))
     db.commit()
     db.refresh(user)
     return _login_payload(db, user)
@@ -369,3 +380,27 @@ def delete_account(db: Db, body: DeletionRequestModel = None, user: User = Depen
     user.is_active = False
     db.commit()
     return {"ok": True}
+
+
+@router.post("/sessions/invalidate-all")
+def invalidate_all_sessions(db: Db, user: User = Depends(get_current_user)) -> dict:
+    """Revoke ALL active refresh tokens for every user in the current tenant."""
+    if user.role not in ("owner", "super_admin"):
+        raise InsufficientPrivileges("Only owners can invalidate all sessions")
+    tenant_ids = [user.tenant_id]
+    if user.role == "super_admin":
+        tenant_ids = [t.id for t in db.query(Tenant.id).all()]
+    member_user_ids = [
+        uid for (uid,) in db.query(User.id).filter(User.tenant_id.in_(tenant_ids)).all()
+    ]
+    if not member_user_ids:
+        return {"ok": True, "revokedCount": 0}
+    revoked_count = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.user_id.in_(member_user_ids), RefreshToken.revoked.is_(False))
+        .update({RefreshToken.revoked: True}, synchronize_session=False)
+    )
+    db.commit()
+    from app.services.event_bus import publish_event
+    publish_event("settings_changed", {"action": "invalidate_all_sessions", "revokedCount": revoked_count})
+    return {"ok": True, "revokedCount": revoked_count}

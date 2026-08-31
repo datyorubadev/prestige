@@ -12,8 +12,11 @@ import { LabelChip } from "@/components/ui/label-chip";
 import { useToast } from "@/components/ui/toast";
 import { Modal } from "@/components/ui/modal";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, API_BASE } from "@/lib/api";
+import { getAccessToken } from "@/lib/auth-store";
 import { useRealtime } from "@/lib/realtime";
+import { useUrlState } from "@/lib/use-url-state";
+import { fmtDateTime } from "@/lib/time";
 import { ConversationPane, type ComposerMode } from "./conversation-pane";
 import { ContextRail } from "./context-rail";
 import { QuickList } from "./quick-list";
@@ -90,21 +93,23 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   const [customerTyping, setCustomerTyping] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [activityOpen, setActivityOpen] = useState(false);
   const [viewingAgents, setViewingAgents] = useState<{id: string; name: string}[]>([]);
   const [mergeOpen, setMergeOpen] = useState(false);
-  const [mergeTarget, setMergeTarget] = useState("");
+  const [mergeSelected, setMergeSelected] = useState<Record<string, boolean>>({});
+  const [mergeQuery, setMergeQuery] = useState("");
+  const [merging, setMerging] = useState(false);
   const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
-  const activityRef = useRef<HTMLDivElement>(null);
 
   /** Swap the active ticket without triggering a Next.js route re-render.
-   *  Updates internal state + browser URL in one tick. */
+   *  Updates internal state + browser URL in one tick, preserving query
+   *  params (?panel=activity, ?filter=mine …) across ticket switches. */
   const switchTicket = useCallback((newId: string) => {
     if (newId === activeId) return;
     setActiveId(newId);
     setSwitching(true);
-    window.history.replaceState(null, "", `/dashboard/tickets/${newId}`);
+    const qs = window.location.search;
+    window.history.replaceState(null, "", `/dashboard/tickets/${newId}${qs}`);
   }, [activeId]);
 
   const loadTicket = useCallback(async () => {
@@ -162,14 +167,22 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   }, [moreOpen]);
 
   // Close activity panel on outside click
+  // Activity panel: swaps into the middle pane in place of the chat trail.
+  // Persisted via ?panel=activity so it survives navigation/refresh.
+  const [panel, setPanel] = useUrlState("panel", "conversation");
+  const activityOpen = panel === "activity";
+  const toggleActivity = useCallback(() => {
+    setPanel(activityOpen ? "conversation" : "activity");
+  }, [activityOpen, setPanel]);
+
   useEffect(() => {
     if (!activityOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (activityRef.current && !activityRef.current.contains(e.target as Node)) setActivityOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPanel("conversation");
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [activityOpen]);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [activityOpen, setPanel]);
 
   // Realtime listeners
   useRealtime(
@@ -186,26 +199,28 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
         const tid = String(ev.data?.ticket_id ?? "");
         if (ticket && (tid === ticket.id || tid === activeId)) {
           const text = String(ev.data?.text ?? "");
-          // Normalize legacy "agent" → "human_agent", and "system" stays as-is for notes
           const rawWho = String(ev.data?.who ?? "customer");
-          const who: TicketMessage["who"] = rawWho === "agent" ? "human_agent" : rawWho as TicketMessage["who"];
+          const who: TicketMessage["who"] = rawWho === "agent" ? "human_agent" : rawWho === "ai" ? "ai_bot" : rawWho as TicketMessage["who"];
           const author = ev.data?.author ? String(ev.data.author) : undefined;
+          const realMsgId = ev.data?.message_id ? String(ev.data.message_id) : undefined;
           const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as WidgetAttachment[]) : [];
+          const kind = ev.data?.kind === "note" ? "note" as const : undefined;
 
-          // Skip self-echo: don't add the message if we already have it optimistically
           if (who === "human_agent" && author === agentName) {
             setTicket((prev) => {
               if (!prev) return null;
-              // Check if an optimistic message with this text already exists
-              if (prev.msgs.some((m) => m.who === "human_agent" && m.text === text && (m.id ?? "").startsWith("agent-"))) {
+              const idx = prev.msgs.findIndex((m) => m.who === "human_agent" && m.text === text && (m.id ?? "").startsWith("agent-"));
+              if (idx !== -1) {
+                if (realMsgId) {
+                  const updated = [...prev.msgs];
+                  updated[idx] = { ...updated[idx], id: realMsgId };
+                  return { ...prev, msgs: updated };
+                }
                 return prev;
               }
-              // Fallback: add it (might be from another agent)
               const newMsg: TicketMessage = {
-                id: `msg-${Date.now()}`,
-                who,
-                text,
-                author,
+                id: realMsgId || `msg-${Date.now()}`,
+                who, text, author, kind,
                 timestamp: "Just now",
                 attachments: attachments.length ? attachments : undefined,
               };
@@ -214,22 +229,68 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             return;
           }
 
-          // For customer/AI messages: dedup by text+who
           setTicket((prev) => {
             if (!prev) return null;
             if (prev.msgs.some((m) => m.text === text && m.who === who && (!attachments.length || m.attachments?.length === attachments.length))) {
               return prev;
             }
             const newMsg: TicketMessage = {
-              id: `msg-${Date.now()}`,
-              who,
-              text,
-              author,
+              id: realMsgId || `msg-${Date.now()}`,
+              who, text, author, kind,
               timestamp: "Just now",
               attachments: attachments.length ? attachments : undefined,
             };
             return { ...prev, msgs: [...prev.msgs, newMsg], preview: text || prev.preview };
           });
+        }
+      },
+      message_updated: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        const mid = String(ev.data?.message_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId) && mid) {
+          const newBody = String(ev.data?.body ?? "");
+          setTicket((prev) => prev ? {
+            ...prev,
+            msgs: prev.msgs.map((m) => m.id === mid ? { ...m, text: newBody, edited: true } : m),
+          } : null);
+        }
+      },
+      message_deleted: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        const mid = String(ev.data?.message_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId) && mid) {
+          setTicket((prev) => prev ? {
+            ...prev,
+            msgs: prev.msgs.filter((m) => m.id !== mid),
+          } : null);
+        }
+      },
+      ticket_escalated: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId)) {
+          setTicket((prev) => prev ? { ...prev, status: "escalated" as Ticket["status"] } : null);
+          toast("Ticket escalated — awaiting human agent");
+        }
+      },
+      ticket_assigned: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId)) {
+          const assignedBy = String(ev.data?.assigned_by_name ?? "Someone");
+          toast(`Ticket assigned by ${assignedBy}`);
+          void loadTicket();
+        }
+      },
+      agent_approval_pending: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId)) {
+          toast("Agent approval requested — review in the conversation", "warning");
+        }
+      },
+      agent_approval_resolved: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (ticket && (tid === ticket.id || tid === activeId)) {
+          const approved = Boolean(ev.data?.approved);
+          toast(approved ? "Approval granted — agent resuming" : "Approval denied");
         }
       },
       customer_typing: (ev) => {
@@ -360,7 +421,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     setTicket((prev) => (prev ? { ...prev, snoozedUntil: until } : null));
     try {
       await api.post(`/tickets/${encodeURIComponent(id)}/snooze`, { until });
-      toast(`Snoozed until ${new Date(until).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`);
+      toast(`Snoozed until ${fmtDateTime(until)}`);
     } catch {
       toast("Could not snooze ticket", "danger");
       void loadTicket();
@@ -385,6 +446,18 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   }, [allTickets, ticket]);
   const prevTicket = currentIndex > 0 ? allTickets[currentIndex - 1] : null;
   const nextTicket = currentIndex >= 0 && currentIndex < allTickets.length - 1 ? allTickets[currentIndex + 1] : null;
+
+  // Merge modal: selectable candidates (exclude current + already-merged tickets)
+  const mergeCandidates = useMemo(() => {
+    const q = mergeQuery.trim().toLowerCase();
+    return allTickets
+      .filter((t) => t.id !== ticket?.id && !t.mergedIntoId)
+      .filter((t) => !q || t.subject.toLowerCase().includes(q) || ticketNumberFor(t).toLowerCase().includes(q));
+  }, [allTickets, ticket?.id, mergeQuery]);
+  const mergeIds = useMemo(
+    () => Object.entries(mergeSelected).filter(([, v]) => v).map(([id]) => id),
+    [mergeSelected],
+  );
 
   // ── Keyboard shortcuts ──
   useEffect(() => {
@@ -434,7 +507,19 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     if (!ticket) return;
     void api.post(`/tickets/${encodeURIComponent(ticket.id)}/presence`, { action: "enter" });
     const handleBeforeUnload = () => {
-      void api.post(`/tickets/${encodeURIComponent(ticket.id)}/presence`, { action: "leave" });
+      // During unload normal fetches are cancelled by the browser ("Failed to
+      // fetch"). Use keepalive + fire-and-forget so the leave beacon survives
+      // and never produces an unhandled rejection.
+      const tok = getAccessToken();
+      void fetch(`${API_BASE}/tickets/${encodeURIComponent(ticket.id)}/presence`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+        body: JSON.stringify({ action: "leave" }),
+        keepalive: true,
+      }).catch(() => {});
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
@@ -480,6 +565,11 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   };
 
   const handleDeleteMessage = async (tId: string, mId: string) => {
+    if (mId.startsWith("agent-") || mId.startsWith("msg-")) {
+      setTicket((prev) => prev ? { ...prev, msgs: prev.msgs.filter((m) => m.id !== mId) } : null);
+      toast("Message deleted");
+      return;
+    }
     try {
       await api.del(`/tickets/${encodeURIComponent(tId)}/messages/${encodeURIComponent(mId)}`);
       setTicket((prev) => prev ? { ...prev, msgs: prev.msgs.filter((m) => m.id !== mId) } : null);
@@ -512,16 +602,38 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     }
   };
 
-  const handleMerge = async () => {
-    if (!ticket || !mergeTarget) return;
+  const [aiToggling, setAiToggling] = useState(false);
+  const handleToggleAi = async () => {
+    if (!ticket || aiToggling) return;
+    const next = !ticket.aiPaused;
+    setAiToggling(true);
+    // Optimistic
+    setTicket((prev) => (prev ? { ...prev, aiPaused: next } : prev));
     try {
-      await api.post(`/tickets/${encodeURIComponent(ticket.id)}/merge`, { primary_ticket_id: mergeTarget });
-      toast("Ticket merged");
+      await api.patch(`/tickets/${encodeURIComponent(ticket.id)}`, { ai_paused: next });
+      toast(next ? "AI paused — you own this conversation" : "AI re-enabled");
+    } catch {
+      setTicket((prev) => (prev ? { ...prev, aiPaused: !next } : prev));
+      toast("Could not change AI state", "danger");
+    } finally {
+      setAiToggling(false);
+    }
+  };
+
+  const handleMerge = async () => {
+    if (!ticket || mergeIds.length === 0) return;
+    setMerging(true);
+    try {
+      await api.post(`/tickets/${encodeURIComponent(ticket.id)}/merge`, { merge_ids: mergeIds });
+      toast(`${mergeIds.length} ticket${mergeIds.length > 1 ? "s" : ""} merged`);
       setMergeOpen(false);
-      setMergeTarget("");
+      setMergeSelected({});
+      setMergeQuery("");
       void loadTicket();
     } catch {
-      toast("Could not merge ticket", "danger");
+      toast("Could not merge tickets", "danger");
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -670,7 +782,6 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             onChange={(v) => handleAssign(ticket.id, v || null)}
             placeholder="Assign to…"
             ariaLabel="Assign ticket"
-            size="sm"
             options={agents.map((a) => ({
               value: a.name,
               label: a.name,
@@ -747,33 +858,35 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
           {/* Divider */}
           <div className="h-5 w-px bg-border mx-0.5" />
 
-          {/* Activity Timeline toggle */}
-          <div className="relative" ref={activityRef}>
-            <button
-              type="button"
-              onClick={() => setActivityOpen((v) => !v)}
-              className={cn(
-                "inline-flex h-7 items-center gap-1 rounded-sm border px-2 text-[11px] font-medium transition-colors cursor-pointer",
-                activityOpen ? "border-primary/40 bg-primary/5 text-primary font-semibold" : "border-border bg-surface text-text-2 hover:bg-surface-2 hover:text-text",
-              )}
-              title="Activity timeline"
-            >
-              <Icon name="clock" size={13} />
-            </button>
-            {activityOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 w-80 max-h-96 overflow-y-auto rounded-md border border-border bg-surface shadow-lg">
-                <div className="sticky top-0 flex items-center justify-between border-b border-border bg-surface px-4 py-2.5">
-                  <span className="text-[11px] font-bold uppercase tracking-wide text-text-3">Activity</span>
-                  <button type="button" onClick={() => setActivityOpen(false)} className="text-text-3 hover:text-text cursor-pointer">
-                    <Icon name="close" size={13} />
-                  </button>
-                </div>
-                <div className="px-4 py-2">
-                  <ActivityTimeline ticketId={ticket.id} />
-                </div>
-              </div>
+          {/* Activity Timeline toggle — swaps the middle panel */}
+          <button
+            type="button"
+            onClick={toggleActivity}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-sm border px-2 text-[11px] font-medium transition-colors cursor-pointer",
+              activityOpen ? "border-primary/40 bg-primary/5 text-primary font-semibold" : "border-border bg-surface text-text-2 hover:bg-surface-2 hover:text-text",
             )}
-          </div>
+            title={activityOpen ? "Back to conversation" : "Activity timeline"}
+          >
+            <Icon name="clock" size={13} />
+          </button>
+
+          {/* AI on/off — pause the bot once a human takes over */}
+          <button
+            type="button"
+            onClick={handleToggleAi}
+            disabled={aiToggling}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-sm border px-2 text-[11px] font-medium transition-colors cursor-pointer",
+              ticket.aiPaused
+                ? "border-border bg-surface text-text-3 hover:bg-surface-2 hover:text-text"
+                : "border-primary/40 bg-primary/5 text-primary font-semibold",
+            )}
+            title={ticket.aiPaused ? "AI is paused — click to re-enable" : "AI is replying — click to pause"}
+          >
+            <Icon name="bot" size={13} />
+            {ticket.aiPaused ? "AI off" : "AI on"}
+          </button>
 
           {/* Toggle Queue */}
           <button
@@ -816,15 +929,15 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       {/* ── Merge Modal ── */}
       <Modal
         open={mergeOpen}
-        onClose={() => { setMergeOpen(false); setMergeTarget(""); }}
-        title="Merge ticket"
+        onClose={() => { setMergeOpen(false); setMergeSelected({}); setMergeQuery(""); }}
+        title="Merge tickets"
         icon="merge"
-        size="sm"
+        size="md"
         footer={
           <>
             <button
               type="button"
-              onClick={() => { setMergeOpen(false); setMergeTarget(""); }}
+              onClick={() => { setMergeOpen(false); setMergeSelected({}); }}
               className="rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors hover:bg-surface-2 cursor-pointer"
             >
               Cancel
@@ -832,29 +945,56 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
             <button
               type="button"
               onClick={handleMerge}
-              disabled={!mergeTarget}
+              disabled={mergeIds.length === 0 || merging}
               className="rounded-sm bg-primary px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
             >
-              Merge
+              {merging ? "Merging…" : `Merge ${mergeIds.length > 0 ? `${mergeIds.length} ticket${mergeIds.length > 1 ? "s" : ""}` : ""}`}
             </button>
           </>
         }
       >
         <p className="text-[12.5px] text-text-2">
-          Select a primary ticket. All messages and labels will be transferred to it, and this ticket will be closed.
+          Select one or more tickets to merge into{" "}
+          <span className="font-semibold text-text">#{ticketNumberFor(ticket)}</span>. Their
+          messages and labels move here and they are closed as duplicates.
         </p>
-        <label className="mt-3 block text-[11px] font-bold uppercase tracking-wide text-text-3">Primary ticket</label>
-        <Select
-          value={mergeTarget}
-          onChange={(v) => setMergeTarget(v)}
-          placeholder="Select ticket to merge into…"
-          ariaLabel="Primary ticket"
-          size="sm"
-          className="mt-1.5 w-full"
-          options={allTickets
-            .filter((t) => t.id !== ticket?.id && !isResolved(t.status))
-            .map((t) => ({ value: t.id, label: `#${ticketNumberFor(t)} — ${t.subject}` }))}
+        <input
+          value={mergeQuery}
+          onChange={(e) => setMergeQuery(e.target.value)}
+          placeholder="Search tickets by subject or number…"
+          aria-label="Search tickets to merge"
+          className="mt-3 w-full rounded-sm border border-border bg-surface-2 px-2.5 py-1.5 text-[12px] text-text outline-none placeholder:text-text-3 focus:border-primary/50"
         />
+        <div className="mt-2 max-h-96 space-y-1 overflow-y-auto pr-1">
+          {mergeCandidates.length === 0 && (
+            <p className="py-4 text-center text-[12px] text-text-3">No other open tickets found.</p>
+          )}
+          {mergeCandidates.map((t) => {
+            const checked = Boolean(mergeSelected[t.id]);
+            return (
+              <label
+                key={t.id}
+                className={cn(
+                  "flex cursor-pointer items-center gap-2.5 rounded-sm border px-2.5 py-2 transition-colors",
+                  checked ? "border-primary/60 bg-primary/10" : "border-transparent hover:bg-surface-2",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => setMergeSelected((prev) => ({ ...prev, [t.id]: !prev[t.id] }))}
+                  className="h-3.5 w-3.5 shrink-0 accent-primary"
+                  aria-label={`Merge ${t.subject}`}
+                />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-text">
+                  <span className="font-semibold">#{ticketNumberFor(t)}</span>{" "}
+                  <span className="text-text-2">{t.subject}</span>
+                </span>
+                <span className="shrink-0 text-[10px] uppercase tracking-wide text-text-3">{t.status}</span>
+              </label>
+            );
+          })}
+        </div>
       </Modal>
 
       {/* ── Three-Panel Workspace ── */}
@@ -867,28 +1007,53 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
           onToggle={() => setQueueOpen((v) => !v)}
         />
 
-        {/* Column 2: Conversation (flat — no card chrome) */}
+        {/* Column 2: Conversation ⇄ Activity (swapped in place) */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
-          <ConversationPane
-            ticket={ticket}
-            agents={agents}
-            canned={canned}
-            agentName={agentName}
-            mode={composerMode}
-            onModeChange={setComposerMode}
-            draft={draft}
-            onDraftChange={setDraft}
-            onSend={handleSend}
-            onResolve={handleResolve}
-            onAssign={handleAssign}
-            onEditNote={handleEditNote}
-            onDeleteNote={handleDeleteNote}
-            onDeleteMessage={handleDeleteMessage}
-            onEditMessage={handleEditMessage}
-            typing={customerTyping}
-            labels={labels}
-            flat
-          />
+          {activityOpen ? (
+            <>
+              <div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4">
+                <div className="flex items-center gap-2">
+                  <Icon name="clock" size={14} className="text-primary" />
+                  <span className="text-[12px] font-bold text-text">
+                    Activity — #{ticketNumberFor(ticket)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={toggleActivity}
+                  title="Back to conversation (Esc)"
+                  aria-label="Back to conversation"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-sm border border-border bg-surface text-text-3 transition-colors hover:bg-surface-2 hover:text-text cursor-pointer"
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+                <ActivityTimeline ticketId={ticket.id} />
+              </div>
+            </>
+          ) : (
+            <ConversationPane
+              ticket={ticket}
+              agents={agents}
+              canned={canned}
+              agentName={agentName}
+              mode={composerMode}
+              onModeChange={setComposerMode}
+              draft={draft}
+              onDraftChange={setDraft}
+              onSend={handleSend}
+              onResolve={handleResolve}
+              onAssign={handleAssign}
+              onEditNote={handleEditNote}
+              onDeleteNote={handleDeleteNote}
+              onDeleteMessage={handleDeleteMessage}
+              onEditMessage={handleEditMessage}
+              typing={customerTyping}
+              labels={labels}
+              flat
+            />
+          )}
         </div>
 
         {/* Column 3: Context rail */}

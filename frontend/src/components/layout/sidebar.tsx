@@ -9,7 +9,7 @@ import { useRealtime } from "@/lib/realtime";
 import { Icon, type IconName } from "@/components/icons";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { } from "@/lib/types";
+import type { AgentUser } from "@/lib/types";
 
 interface NavItem {
   href: string;
@@ -17,7 +17,7 @@ interface NavItem {
   icon: IconName;
   ownerOnly?: boolean;
   /** Live queued-work count shown as a badge (design.md §4.2 `.count`). */
-  count?: "open" | "mine";
+  count?: "open" | "mine" | "agents_online";
 }
 
 interface NavGroup {
@@ -65,7 +65,7 @@ const TENANT_NAV: NavGroup[] = [
       { href: "/dashboard/kb", label: "KB articles", icon: "file", ownerOnly: false },
       { href: "/dashboard/upload", label: "Knowledge base", icon: "book", ownerOnly: true },
       { href: "/dashboard/escalation", label: "Escalation rules", icon: "zap", ownerOnly: true },
-      { href: "/dashboard/agents", label: "Agents", icon: "users", ownerOnly: true },
+      { href: "/dashboard/agents", label: "Agents", icon: "users", ownerOnly: true, count: "agents_online" },
       { href: "/dashboard/canned", label: "Canned replies", icon: "edit", ownerOnly: false },
       { href: "/dashboard/settings", label: "Settings", icon: "sliders", ownerOnly: true },
     ],
@@ -104,6 +104,7 @@ export function Sidebar({ bannerActive = false }: { bannerActive?: boolean }) {
   const { user, role, impersonating } = useAuth();
   const pathname = usePathname();
   const [openCount, setOpenCount] = useState<number | null>(null);
+  const [agentsOnlineCount, setAgentsOnlineCount] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
   const isAdminPath = pathname.startsWith("/admin");
@@ -145,23 +146,39 @@ export function Sidebar({ bannerActive = false }: { bannerActive?: boolean }) {
       .catch(() => setOpenCount(null));
   }, []);
 
+  const refreshAgentsOnline = useCallback(() => {
+    void api
+      .get<AgentUser[]>("/agents")
+      .then((list) => {
+        const count = list.filter(
+          (a) => (a.presenceStatus ?? (a.online ? "online" : "offline")) === "online",
+        ).length;
+        setAgentsOnlineCount(count > 0 ? count : null);
+      })
+      .catch(() => setAgentsOnlineCount(null));
+  }, []);
+
   useEffect(() => {
     refreshCount();
-  }, [refreshCount]);
+    refreshAgentsOnline();
+  }, [refreshCount, refreshAgentsOnline]);
 
   useRealtime({
     ticket_created: refreshCount,
     ticket_updated: refreshCount,
     ticket_escalated: refreshCount,
     message_created: refreshCount,
+    agent_presence: refreshAgentsOnline,
   });
 
   const countFor = (item: NavItem): number | null => {
     if (item.count === "open") {
       return openCount && openCount > 0 ? openCount : null;
     }
+    if (item.count === "agents_online") {
+      return agentsOnlineCount;
+    }
     if (item.count === "mine") {
-      // For "mine" count, we'd need a separate endpoint; fall back to null for now.
       return null;
     }
     return null;
@@ -268,12 +285,18 @@ export function Sidebar({ bannerActive = false }: { bannerActive?: boolean }) {
                         />
                         {!collapsed && <span className="min-w-0 flex-1 truncate">{item.label}</span>}
                         {!collapsed && badge != null && (
-                          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-danger px-1.5 text-[10.5px] font-bold tabular-nums leading-none text-white">
+                          <span className={cn(
+                            "flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10.5px] font-bold tabular-nums leading-none text-white",
+                            item.count === "agents_online" ? "bg-primary" : "bg-danger",
+                          )}>
                             {badge}
                           </span>
                         )}
                         {collapsed && badge != null && (
-                          <span className="absolute top-1 right-1 flex h-2 w-2 rounded-full bg-danger" />
+                          <span className={cn(
+                            "absolute top-1 right-1 flex h-2 w-2 rounded-full",
+                            item.count === "agents_online" ? "bg-primary" : "bg-danger",
+                          )} />
                         )}
                       </Link>
                     );

@@ -15,8 +15,8 @@ prototype still runs without Redis. thread_id == ticket_id for every run.
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Annotated, TypedDict
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any, TypedDict
 
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -145,7 +145,15 @@ def _route_path(state: AgentState) -> list[str]:
         targets.extend(["lookup_ticket_status", "lookup_customer"])
     if any(k in q for k in ("account", "vip", "balance", "profile", "who am i", "details")):
         targets.append("lookup_customer")
-    return targets or ["generate"]
+    if targets:
+        return targets
+    # KB can't answer and nothing above hard-routes → soft human assist. Any
+    # empty-retrieval question goes to an available agent (unless there is no
+    # one online, in which case the node escalates). Keeps the bot from
+    # improvising policy on questions the KB doesn't cover.
+    if not (state.get("context") or "").strip():
+        return ["assist_from_human"]
+    return ["generate"]
 
 
 def _route(_state: AgentState) -> dict:
@@ -683,11 +691,11 @@ def _run_doc_verify_tool(db, tool, state: AgentState) -> str:
     if ticket:
         msgs = (
             db.query(Message)
-            .filter(Message.ticket_id == state["ticket_id"], Message.sender == MessageSender.customer)
+            .filter(Message.ticket_id == state["ticket_id"], Message.sender_type == MessageSender.CUSTOMER)
             .order_by(Message.timestamp.asc())
             .all()
         )
-        all_customer_text = " ".join(m.content or "" for m in msgs)
+        all_customer_text = " ".join(m.body or "" for m in msgs)
 
     # Score: check how many fields match
     match_results = {}
@@ -948,14 +956,12 @@ def _lookup_customer(state: AgentState) -> dict:
         db.close()
 
 
-def _handoff_to_human(db, tenant: Tenant, ticket: Ticket) -> None:
-    """Direct handoff when no escalation rule fired (mirrors escalation.apply)."""
-    ticket.status = TicketStatus.ESCALATED
-    ticket.escalated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(Message(
-        ticket_id=ticket.id, sender_type=MessageSender.SYSTEM, sender_name="System",
-        body="Human handoff requested by customer", is_bot=False, is_read=True,
-    ))
+def _find_online_agents(db, tenant: Tenant) -> tuple[list[User], list[User]]:
+    """Return (all active staff, online/away staff) for a tenant.
+
+    Shared by hard handoff, escalation and the soft human-assist flow so the
+    "who is available" definition stays in one place.
+    """
     agents = (
         db.query(User)
         .filter(User.tenant_id == tenant.id, User.role != Role.CUSTOMER, User.is_active.is_(True))
@@ -966,7 +972,71 @@ def _handoff_to_human(db, tenant: Tenant, ticket: Ticket) -> None:
         )
         .all()
     )
-    online_agents = [a for a in agents if getattr(a, "presence_status", "offline") in ("online", "away")]
+    online = [a for a in agents if getattr(a, "presence_status", "offline") in ("online", "away")]
+    return agents, online
+
+
+def _assist_expired(payload: dict) -> bool:
+    """True if a human_assist interrupt is older than the configured window."""
+    created = (payload or {}).get("created_at")
+    if not created:
+        return False
+    try:
+        ts = datetime.fromisoformat(created)
+    except (ValueError, TypeError):
+        return False
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - ts) > timedelta(
+        minutes=settings.human_assist_timeout_minutes
+    )
+
+
+def _escalate_stale_assist(ticket_id: str) -> None:
+    """Hard-escalate a soft assist nobody answered, then clear the graph
+    interrupt so the thread closes rather than hanging forever."""
+    db = SessionLocal()
+    try:
+        ticket = db.get(Ticket, ticket_id)
+        tenant = db.get(Tenant, ticket.tenant_id) if ticket else None
+        if ticket and tenant:
+            _handoff_to_human(db, tenant, ticket)
+            db.refresh(ticket)
+    finally:
+        db.close()
+
+
+def _notify_assist(ticket_id: str, payload: dict) -> None:
+    """Notify every available agent that a KB gap needs a human answer (soft
+    handoff). Creates a HUMAN_ASSIST notification + a realtime ping. The
+    bot stays the face of the chat; the first agent to answer resolves it."""
+    db = SessionLocal()
+    try:
+        ticket = db.get(Ticket, ticket_id)
+        tenant = db.get(Tenant, payload.get("tenant_id") or ticket.tenant_id) if ticket else None
+        if not ticket or not tenant:
+            return
+        _, online = _find_online_agents(db, tenant)
+        for agent in online:
+            db.add(Notification(
+                tenant_id=tenant.id, user_id=agent.id, type=NotificationType.HUMAN_ASSIST,
+                title="Needs your answer",
+                body=(payload.get("question") or ticket.subject or "")[:180],
+                ticket_id=ticket.id,
+            ))
+        db.commit()
+        publish_event("notification", {"ticket_id": ticket.id})
+    finally:
+        db.close()
+
+
+def _handoff_to_human(db, tenant: Tenant, ticket: Ticket) -> None:
+    """Direct handoff when no escalation rule fired (mirrors escalation.apply)."""
+    ticket.status = TicketStatus.ESCALATED
+    ticket.escalated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.add(Message(
+        ticket_id=ticket.id, sender_type=MessageSender.SYSTEM, sender_name="System",
+        body="Human handoff requested by customer", is_bot=False, is_read=True,
+    ))
+    agents, online_agents = _find_online_agents(db, tenant)
     for i, agent in enumerate(agents):
         if ticket.assignee_id is None and i == 0:
             ticket.assignee_id = agent.id
@@ -981,8 +1051,67 @@ def _handoff_to_human(db, tenant: Tenant, ticket: Ticket) -> None:
             is_bot=False, is_read=True,
         ))
     db.commit()
+    publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     publish_event("notification", {"ticket_id": ticket.id})
+
+
+def _assist_from_human(state: AgentState) -> dict:
+    """Soft handoff: KB can't answer and nothing hard-escalates, so we pause on
+    an interrupt() and ask any available agent. The agent's answer resumes the
+    graph and is delivered to the customer as the bot's own reply.
+
+    Unlike escalate_to_human we do NOT flip the ticket to ESCALATED — the bot
+    stays the face of the conversation while a human quietly supplies the words.
+    """
+    from app.models import EscalationRule
+
+    db = SessionLocal()
+    try:
+        ticket = db.get(Ticket, state["ticket_id"])
+        tenant = db.get(Tenant, state["tenant_id"])
+        if not ticket or not tenant:
+            return {"tool_results": ["assist: ticket/tenant missing"],
+                    "reply": "Let me get back to you shortly with an answer."}
+
+        # Skip the soft path when nothing human is around to pick it up — fall
+        # through to a real escalation so the customer is never left waiting.
+        _, online = _find_online_agents(db, tenant)
+        if not online and tenant.id and ticket.id:
+            logger.info("human_assist: no online agents for %s; escalating", ticket.id)
+            fired = escalation.evaluate(db, tenant, ticket, state["query"])
+            if fired:
+                escalation.apply(db, tenant, ticket, fired, note="KB gap + no online agents")
+            else:
+                _handoff_to_human(db, tenant, ticket)
+            return {"tool_results": ["assist: no online agent -> escalate"],
+                    "reply": "I'll get you to a human agent right away."}
+
+        ticket.ai_sentiment = "kb_gap"
+        ticket.ai_summary = (
+            f"Couldn't answer from knowledge base — “{(state.get('query') or '')[:120]}”"
+        )
+        db.commit()
+
+        customer = state.get("customer") or {}
+        pause_reply = ("Let me check with my team on that — I'll be right back with an answer.")
+        interrupt({
+            "type": "human_assist",
+            "ticket_id": ticket.id,
+            "tenant_id": tenant.id,
+            "customer_reply": pause_reply,
+            "question": state.get("query", ""),
+            "customer_email": customer.get("email"),
+            "customer_name": customer.get("full_name"),
+            "ticket_number": format_ticket_number(ticket),
+            "bot_name": tenant.bot_name,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        })
+        return {"tool_results": ["assist: waiting on human agent"],
+                "reply": pause_reply}
+    finally:
+        db.close()
 
 
 def _escalate_to_human(state: AgentState) -> dict:
@@ -1044,30 +1173,83 @@ def _initiate_refund(state: AgentState) -> dict:
         db.close()
 
 
+def compose_system_prompt(
+    tenant: dict,
+    context: str = "",
+    tool_results: list[str] | None = None,
+    customer: dict | None = None,
+) -> str:
+    """Build the full system prompt for reply generation.
+
+    Shared by _generate and the /ai/prompt-preview endpoint so what you
+    preview is exactly what production uses.
+    """
+    business = tenant.get("business_name", "your business")
+    bot_name = tenant.get("bot_name", "AI Assistant")
+    tone = tenant.get("brand_tone", "professional")
+    custom_prompt = tenant.get("ai_system_prompt")
+
+    persona_block = (
+        f"Custom guidelines from the business owner (follow them):\n{custom_prompt}"
+        if custom_prompt
+        else f"Default style: use a {tone} tone."
+    )
+
+    parts = [
+        f"ROLE\nYou are \"{bot_name}\", the AI support assistant for {business}. "
+        f"You help customers resolve issues quickly and accurately.",
+
+        "HOW TO ANSWER\n"
+        "1. Lead with the direct answer to the customer's LATEST message — no preamble, "
+        "no 'As an AI' talk, no restating their question.\n"
+        "2. For steps or options, use short numbered items. Keep every line scannable.\n"
+        "3. If the customer sounds frustrated or explicitly asks for a person, open with ONE "
+        "short empathetic sentence, then offer/confirm transfer to a human agent.\n"
+        "4. End with at most ONE specific next step or question that moves the issue forward. "
+        "Never generic filler like \"Is there anything else I can help with?\".\n"
+        "5. Keep replies roughly 40–120 words unless genuine step-by-step detail needs more.",
+
+        "FACTS & GROUNDING\n"
+        "- Account/order/payment specifics may ONLY come from TOOL FACTS below. If absent, "
+        "ask the customer for the missing reference or say a human will verify it — never guess.\n"
+        "- Prefer answers grounded in the KNOWLEDGE BASE. If it doesn't cover the question, say "
+        "you'll confirm with the team rather than improvising policy.\n"
+        "- Never invent tracking numbers, dates, amounts, or policy exceptions.",
+
+        persona_block,
+    ]
+
+    if context:
+        parts.append(guardrails.wrap_knowledge_base(context))
+    tool_results = tool_results or []
+    if tool_results:
+        parts.append("--- FACTS FROM TOOLS (authoritative — use these numbers/details verbatim when relevant) ---\n"
+                     + "\n".join(tool_results)
+                     + "\n--- END TOOL FACTS ---")
+    if customer and customer.get("is_vip"):
+        parts.append("This customer is a VIP — prioritise speed and a personal touch.")
+
+    base = "\n\n".join(parts)
+
+    history_rules = (
+        "\n\nThe message history is provided for context only. Use it to stay consistent, but "
+        "never repeat, rephrase, or echo your own previous replies or the customer's earlier "
+        "messages. Answer ONLY the customer's latest message."
+    )
+    return guardrails.hardened_system(base + history_rules, settings.max_reply_words)
+
+
 def _generate(state: AgentState, config) -> dict:
     if state.get("reply"):
         return {"reply": state["reply"]}
     tenant = state.get("tenant") or {}
-    business = tenant.get("business_name", "your business")
-    custom_prompt = tenant.get("ai_system_prompt")
-    prompt_instructions = (
-        f"Custom guidelines: {custom_prompt}\n"
-        if custom_prompt
-        else f"Brand tone: {tenant.get('brand_tone', 'professional')}. If the customer is frustrated or asks for a human, suggest transferring to a human agent."
+
+    system = compose_system_prompt(
+        tenant,
+        context=state.get("context") or "",
+        tool_results=state.get("tool_results") or [],
+        customer=state.get("customer"),
     )
-    system = guardrails.hardened_system(
-        f"You are the support assistant '{tenant.get('bot_name', 'AI Assistant')}' for {business}.\n{prompt_instructions}",
-        settings.max_reply_words,
-    )
-    context = state.get("context") or ""
-    if context:
-        system += "\n" + guardrails.wrap_knowledge_base(context)
-    tool_results = state.get("tool_results") or []
-    if tool_results:
-        system += "\n\n--- FACTS FROM TOOLS (use them when relevant) ---\n" + "\n".join(tool_results) + "\n--- END ---"
-    customer = state.get("customer")
-    if customer and customer.get("is_vip"):
-        system += "\n\nThis customer is a VIP — prioritise fast, personal service."
 
     user_query = state["query"]
     history = state.get("history") or []
@@ -1081,17 +1263,13 @@ def _generate(state: AgentState, config) -> dict:
     while history and (history[-1].get("content") or "").strip().lower() == needle:
         history = history[:-1]
 
-    system += ("\n\nThe message history is provided for context only. Use it to stay "
-               "consistent with the conversation, but never repeat, rephrase, or "
-               "echo your own previous replies or the customer's earlier messages. "
-               "Answer only the customer's latest message.")
-
     # Assemble conversation messages for LLM
     messages = [("system", system)]
     for h in history:
         messages.append(("human" if h.get("role") == "user" else "ai", h.get("content", "")))
     messages.append(("human", guardrails.wrap_user(user_query)))
 
+    business = tenant.get("business_name", "your company")
     if settings.groq_api_key:
         try:
             from app.services.ai import _get_llm
@@ -1121,6 +1299,7 @@ builder.add_node("route", _route)
 builder.add_node("lookup_ticket_status", _lookup_ticket_status)
 builder.add_node("lookup_customer", _lookup_customer)
 builder.add_node("escalate_to_human", _escalate_to_human)
+builder.add_node("assist_from_human", _assist_from_human)
 builder.add_node("initiate_refund", _initiate_refund)
 builder.add_node("generate", _generate)
 
@@ -1135,11 +1314,13 @@ builder.add_conditional_edges(
         "lookup_ticket_status": "lookup_ticket_status",
         "lookup_customer": "lookup_customer",
         "escalate_to_human": "escalate_to_human",
+        "assist_from_human": "assist_from_human",
         "initiate_refund": "initiate_refund",
         "generate": "generate",
     },
 )
-for tool_node in ("lookup_ticket_status", "lookup_customer", "escalate_to_human", "initiate_refund"):
+for tool_node in ("lookup_ticket_status", "lookup_customer", "escalate_to_human",
+                  "assist_from_human", "initiate_refund"):
     builder.add_edge(tool_node, "generate")
 builder.add_edge("generate", END)
 
@@ -1212,6 +1393,13 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
         if not tenant or not getattr(tenant, "ai_enabled", True):
             yield {"done": True, "disabled": True}
             return
+        ticket = db.get(Ticket, ticket_id)
+        if ticket is not None and (
+            getattr(ticket, "ai_paused", False) or ticket.status == TicketStatus.ESCALATED
+        ):
+            # A human owns this conversation now — stay quiet.
+            yield {"done": True, "ai_paused": True}
+            return
     finally:
         db.close()
 
@@ -1227,6 +1415,14 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
 
     pending = await pending_approval(ticket_id)
     if pending:
+        ptype = pending.get("type") if isinstance(pending, dict) else None
+        if ptype == "human_assist" and _assist_expired(pending):
+            # No one answered within the window — hard-escalate so the customer
+            # is handed to a human instead of waiting indefinitely on a soft assist.
+            try:
+                _escalate_stale_assist(ticket_id)
+            except Exception:
+                logger.exception("Failed to escalate stale human-assist")
         # Previous turn is awaiting human approval. Don't start a new run on
         # this thread (it would resume the interrupted graph); hold instead.
         hold = ("One moment — our team is still confirming your last request. "
@@ -1268,11 +1464,22 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
     interrupts = _snapshot_interrupts(state)
     if interrupts:
         payload = interrupts[0]
+        ptype = (payload or {}).get("type") if isinstance(payload, dict) else None
         customer_reply = (payload or {}).get("customer_reply") if isinstance(payload, dict) else None
-        if customer_reply:
-            yield {"token": customer_reply}
-        publish_event("agent_approval_pending", {"ticket_id": ticket_id, "payload": payload})
-        yield {"done": True, "response_by": "ai", "needs_approval": True, "approval_payload": payload}
+        if ptype == "human_assist":
+            # KB couldn't answer → ask available agents (soft handoff). Notify
+            # every online agent + broadcast a pending event so the dashboard
+            # can show an "answer this" prompt.
+            if customer_reply:
+                yield {"token": customer_reply}
+            _notify_assist(ticket_id, payload)
+            publish_event("human_assist_pending", {"ticket_id": ticket_id, "payload": payload})
+            yield {"done": True, "response_by": "ai", "human_assist_pending": True, "assist_payload": payload}
+        else:
+            if customer_reply:
+                yield {"token": customer_reply}
+            publish_event("agent_approval_pending", {"ticket_id": ticket_id, "payload": payload})
+            yield {"done": True, "response_by": "ai", "needs_approval": True, "approval_payload": payload}
     else:
         reply = (state.values or {}).get("reply")
         if reply:
@@ -1312,8 +1519,35 @@ async def pending_approval(ticket_id: str) -> dict | None:
 async def resume_agent(ticket_id: str, payload: dict) -> dict:
     config = _thread_config(ticket_id)
     state = await compiled.aget_state(config)
-    if not _snapshot_interrupts(state):
+    interrupts = _snapshot_interrupts(state)
+    if not interrupts:
         return {"ok": False, "error": "no_pending_approval"}
+    pending = interrupts[0]
+    ptype = (pending or {}).get("type") if isinstance(pending, dict) else None
+
+    # Human-assist (soft handoff): the agent's answer IS the customer reply.
+    # Resume the graph so the interrupt clears, then deliver the answer as the
+    # bot's own message so the customer never sees the handoff.
+    if ptype == "human_assist":
+        answer = ((payload or {}).get("answer") or "").strip()
+        if not answer:
+            return {"ok": False, "error": "empty_answer"}
+        await compiled.ainvoke(Command(resume={"answer": answer}), config)
+        try:
+            db = SessionLocal()
+            try:
+                chat_service.persist_ai_reply(db, ticket_id, answer)
+                ticket = db.get(Ticket, ticket_id)
+                if ticket:
+                    ticket.ai_sentiment = "kb_gap_resolved"
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Failed to persist human-assist answer")
+        publish_event("human_assist_resolved", {"ticket_id": ticket_id, "reply": answer})
+        return {"ok": True, "reply": answer}
+
+    # Existing HITL approval path (e.g. refund).
     await compiled.ainvoke(Command(resume=payload), config)
     final = await compiled.aget_state(config)
     reply = final.values.get("reply")

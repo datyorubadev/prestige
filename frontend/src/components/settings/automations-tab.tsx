@@ -965,11 +965,7 @@ function AiSystemPromptTab() {
       );
     } catch {
       setTestOutput(
-        `[Simulated Response with custom prompt]\nHello! I am ${botName || "AI Assistant"}. ${
-          testInput.toLowerCase().includes("refund")
-            ? "I've flagged your account for immediate refund review and notified an agent."
-            : "I'm reviewing your inquiry with our knowledge base and will assist you right away."
-        }`,
+        `[AI could not be reached]\nPlease check that the AI service is configured and try again.`,
       );
     } finally {
       setTesting(false);

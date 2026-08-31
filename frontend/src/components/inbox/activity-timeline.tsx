@@ -5,6 +5,7 @@ import { Icon, type IconName } from "@/components/icons";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { fmtDateTime } from "@/lib/time";
 import type { TicketEvent } from "@/lib/types";
 
 interface ActivityTimelineProps {
@@ -12,25 +13,47 @@ interface ActivityTimelineProps {
 }
 
 const EVENT_ICONS: Record<string, IconName> = {
+  ticket_created: "ticket",
   status_changed: "swap",
   assignee_changed: "user",
-  priority_changed: "alert-triangle",
+  priority_changed: "alert-triangle" as IconName,
   snoozed: "clock",
   unsnoozed: "clock",
   ticket_merged: "merge",
+  ticket_merged_away: "merge",
   label_changed: "tag",
+  team_changed: "team",
   note_added: "lock",
+  reply_added: "send",
+  customer_replied: "user",
+  ai_replied: "bot",
+  escalated: "info",
+  csat_rated: "smile",
+  message_edited: "edit",
+  message_deleted: "trash",
+  ai_control: "bot",
 };
 
 const EVENT_LABELS: Record<string, string> = {
+  ticket_created: "Ticket created",
   status_changed: "Status changed",
-  assignee_changed: "Assigned",
+  assignee_changed: "Assignee changed",
   priority_changed: "Priority changed",
-  snoozed: "Ticket snoozed",
-  unsnoozed: "Ticket unsnoozed",
-  ticket_merged: "Ticket merged",
+  snoozed: "Snoozed",
+  unsnoozed: "Snooze removed",
+  ticket_merged: "Merged into this ticket",
+  ticket_merged_away: "Merged away",
   label_changed: "Labels updated",
-  note_added: "Note added",
+  team_changed: "Team updated",
+  note_added: "Internal note added",
+  reply_added: "Agent replied",
+  customer_replied: "Customer messaged",
+  ai_replied: "AI assistant replied",
+  escalated: "Escalated",
+  csat_rated: "CSAT rating submitted",
+  message_edited: "Message edited",
+  message_deleted: "Message deleted",
+  ai_control: "AI control changed",
 };
 
 function formatEventTime(iso?: string): string {
@@ -96,6 +119,7 @@ export function ActivityTimeline({ ticketId }: ActivityTimelineProps) {
               <p className="text-[12px] text-text">
                 <span className="font-semibold">{ev.actorName}</span>{" "}
                 <span className="text-text-2">{label.toLowerCase()}</span>
+                <span className="ml-2 text-[10px] text-text-3">{formatEventTime(ev.createdAt)}</span>
               </p>
               {ev.field && ev.oldValue && ev.newValue && (
                 <p className="mt-0.5 text-[11px] text-text-3">
@@ -104,11 +128,14 @@ export function ActivityTimeline({ ticketId }: ActivityTimelineProps) {
                   <span className="font-medium text-text-2">{ev.newValue}</span>
                 </p>
               )}
-              {ev.detail && !ev.field && (
-                <p className="mt-0.5 text-[11px] text-text-3">{ev.detail}</p>
+              {ev.detail && (
+                <p className="mt-0.5 break-words text-[11px] text-text-3">{ev.detail}</p>
               )}
             </div>
-            <span className="shrink-0 text-[10px] text-text-3 opacity-0 transition-opacity group-hover:opacity-100">
+            <span
+              title={ev.createdAt ? fmtDateTime(ev.createdAt) : undefined}
+              className="shrink-0 text-[10px] text-text-3"
+            >
               {formatEventTime(ev.createdAt)}
             </span>
           </div>

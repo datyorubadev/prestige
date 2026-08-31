@@ -110,6 +110,7 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("ai_tokens_used", "INTEGER DEFAULT 0"),
         ("ai_tokens_limit", "INTEGER DEFAULT 1000000"),
         ("ai_system_prompt", "TEXT"),
+        ("timezone", "VARCHAR(64) DEFAULT 'Africa/Lagos'"),
         ("display_image", "VARCHAR(500)"),
     ],
     "tickets": [
@@ -118,6 +119,7 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("display_number", "VARCHAR(32)"),
         ("snoozed_until", "DATETIME"),
         ("merged_into_id", "VARCHAR(36)"),
+        ("ai_paused", "BOOLEAN DEFAULT 0"),
         # Note: waiting_for_customer and waiting_internal are string values in TicketStatus Enum, no schema migration needed
     ],
     "tenant_custom_tools": [
@@ -130,6 +132,10 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "users": [
         ("presence_status", "VARCHAR(20) DEFAULT 'offline'"),
+        ("totp_secret", "VARCHAR(64)"),
+        ("totp_enabled", "BOOLEAN DEFAULT FALSE"),
+        ("sso_provider", "VARCHAR(50)"),
+        ("sso_subject", "VARCHAR(255)"),
     ],
 }
 

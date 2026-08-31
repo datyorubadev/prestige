@@ -34,11 +34,12 @@ interface AgentAssistPanelProps {
 /** Agent assist panel in the rail's Assist tab — staff can talk to the
  *  agent AI, and approve/decline the human-in-the-loop actions it flags. */
 export function AgentAssistPanel({ ticketId, onUseSuggestion }: AgentAssistPanelProps) {
-  const { send, active, error, fetchPending, approve } = useAgentAssist();
+  const { send, active, error, fetchPending, approve, answer } = useAgentAssist();
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<AssistTurn[]>([]);
   const [pending, setPending] = useState<AgentAssistPending | null>(null);
   const [working, setWorking] = useState(false);
+  const [assistDraft, setAssistDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
   const refreshPending = useCallback(async () => {
@@ -60,6 +61,16 @@ export function AgentAssistPanel({ ticketId, onUseSuggestion }: AgentAssistPanel
     },
     agent_approval_resolved: (ev) => {
       if (ev.data?.ticket_id === ticketId) void refreshPending();
+    },
+    human_assist_pending: (ev) => {
+      if (ev.data?.ticket_id === ticketId) void refreshPending();
+    },
+    human_assist_resolved: (ev) => {
+      if (ev.data?.ticket_id === ticketId) {
+        setPending(null);
+        setAssistDraft("");
+        void refreshPending();
+      }
     },
   });
 
@@ -112,8 +123,21 @@ export function AgentAssistPanel({ ticketId, onUseSuggestion }: AgentAssistPanel
         setWorking(false);
       }
     },
-    [ticketId, approve, refreshPending],
+      [ticketId, approve, refreshPending],
   );
+
+  const sendAnswer = useCallback(async () => {
+    if (!assistDraft.trim()) return;
+    setWorking(true);
+    try {
+      await answer(ticketId, assistDraft.trim());
+      setPending(null);
+      setAssistDraft("");
+      void refreshPending();
+    } finally {
+      setWorking(false);
+    }
+  }, [ticketId, assistDraft, answer, refreshPending]);
 
   const hasAiTurn = turns.some((t) => t.role === "ai");
 
@@ -129,7 +153,36 @@ export function AgentAssistPanel({ ticketId, onUseSuggestion }: AgentAssistPanel
         )}
       </div>
 
-      {pending && (
+      {pending?.type === "human_assist" && (
+        <div className="mt-2 rounded-md border border-primary-border bg-primary-soft px-3 py-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-primary">
+            Needs your answer
+          </p>
+          {pending.question && (
+            <p className="mt-1.5 rounded-sm border border-primary-border/60 bg-white px-2.5 py-2 text-[11.5px] leading-relaxed text-text">
+              &ldquo;{pending.question}&rdquo;
+            </p>
+          )}
+          <textarea
+            value={assistDraft}
+            onChange={(e) => setAssistDraft(e.target.value)}
+            rows={3}
+            placeholder="Type the answer the bot relays…"
+            className="input-control mt-2 w-full resize-none py-2 text-[12px]"
+          />
+          <button
+            type="button"
+            onClick={() => void sendAnswer()}
+            disabled={working || !assistDraft.trim()}
+            className="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-sm bg-primary px-2.5 py-1.5 text-[11.5px] font-semibold text-white transition-colors duration-150 hover:bg-primary-dark disabled:opacity-50"
+          >
+            <Icon name="send" size={12} />
+            Send answer
+          </button>
+        </div>
+      )}
+
+      {pending && pending.type !== "human_assist" && (
         <div className="mt-2 rounded-md border border-warning-border bg-warning-soft px-3 py-2.5">
           <p className="text-[10px] font-bold uppercase tracking-wide text-warning">
             Approval needed

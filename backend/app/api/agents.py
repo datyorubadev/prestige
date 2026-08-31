@@ -108,6 +108,32 @@ def resend_invite(agent_id: str, db: Db, tenant: Tenant = Depends(get_tenant),
     return _dto(db, tenant, member)
 
 
+@router.post("/{agent_id}/revoke-invite")
+def revoke_invite(agent_id: str, db: Db, tenant: Tenant = Depends(get_tenant),
+                  user: User = Depends(require_perm(TEAM_MANAGE))) -> dict:
+    """Revoke a pending invitation: invalidate tokens, remove the User + TenantMember rows."""
+    member = db.get(User, agent_id)
+    if not member or member.tenant_id != tenant.id:
+        raise TicketNotFound("Agent not found")
+    if member.last_seen is not None:
+        raise HTTPException(status_code=400, detail="Agent has already accepted their invitation")
+    # Invalidate all invite tokens for this email + tenant
+    db.query(Invite).filter(
+        Invite.tenant_id == tenant.id,
+        Invite.email == member.email,
+        Invite.is_active == True,  # noqa: E712
+    ).update({"is_active": False})
+    # Remove the pending TenantMember
+    membership = _membership(db, tenant, member.id)
+    if membership:
+        db.delete(membership)
+    # Remove the pending User
+    dto = _dto(db, tenant, member)
+    db.delete(member)
+    db.commit()
+    return dto
+
+
 @router.delete("/{agent_id}")
 def set_agent_active(agent_id: str, db: Db, tenant: Tenant = Depends(get_tenant),
                      user: User = Depends(require_perm(TEAM_MANAGE))) -> dict:
@@ -201,11 +227,17 @@ def heartbeat(db: Db, user: User = Depends(get_current_user)) -> dict:
     if user.presence_status == "offline":
         user.presence_status = "online"
     db.commit()
+    agents_online = db.query(User).filter(
+        User.tenant_id == user.tenant_id,
+        User.presence_status.in_(["online", "away"]),
+        User.role.in_(["agent", "owner"]),
+    ).count()
     publish_event("agent_presence", {
         "user_id": user.id,
         "user_name": user.full_name,
         "online": True,
         "presence_status": user.presence_status,
+        "agents_online": agents_online,
     })
     return {"ok": True, "last_seen": user.last_seen.isoformat() if user.last_seen else None}
 
@@ -223,11 +255,17 @@ def set_my_presence(body: PresenceUpdate, db: Db,
     else:
         user.last_seen = datetime.utcnow()
     db.commit()
+    agents_online = db.query(User).filter(
+        User.tenant_id == user.tenant_id,
+        User.presence_status.in_(["online", "away"]),
+        User.role.in_(["agent", "owner"]),
+    ).count()
     publish_event("agent_presence", {
         "user_id": user.id,
         "user_name": user.full_name,
         "online": body.status != "offline",
         "presence_status": body.status,
+        "agents_online": agents_online,
     })
     return {"ok": True, "presence_status": user.presence_status}
 

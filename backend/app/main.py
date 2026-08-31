@@ -9,6 +9,16 @@ from app.core.logging import setup_logging
 def create_app() -> FastAPI:
     app = FastAPI(title="Prestige — Multi-Tenant AI Support Portal")
 
+    if settings.sentry_dsn:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.environment,
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+        )
+
     from app.database import migrate_schema
 
     migrate_schema()
@@ -42,12 +52,13 @@ def create_app() -> FastAPI:
     os.makedirs("static/uploads", exist_ok=True)
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
-    from app.api import (agents, assist, attachments, auth, canned, channel_webhooks, channels, crawl,
+    from app.api import (agents, ai, assist, attachments, auth, billing, canned, channel_webhooks, channels, crawl,
                          custom_fields, custom_tools, customers, dashboard, faqs, invoices, kb, knowledge,
                          labels, macros, notifications, portal, realtime, rules,
-                         settings as settings_api, superadmin, teams, tickets, widget, verification)
+                         settings as settings_api, superadmin, teams, tickets, two_factor, widget, verification)
 
     app.include_router(auth.router, prefix="/api")
+    app.include_router(ai.router, prefix="/api")
     app.include_router(tickets.router, prefix="/api")
     app.include_router(customers.router, prefix="/api")
     app.include_router(labels.router, prefix="/api")
@@ -61,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, prefix="/api")
     app.include_router(canned.router, prefix="/api")
     app.include_router(invoices.router, prefix="/api")
+    app.include_router(billing.router, prefix="/api")
     app.include_router(rules.router, prefix="/api")
     app.include_router(notifications.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
@@ -75,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(assist.router, prefix="/api")
     app.include_router(teams.router, prefix="/api")
     app.include_router(verification.router, prefix="/api")
+    app.include_router(two_factor.router, prefix="/api")
     app.include_router(realtime.router)
     app.include_router(realtime.ws_router)
 

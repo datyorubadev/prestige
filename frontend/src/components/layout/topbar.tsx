@@ -9,6 +9,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { SearchBox } from "@/components/layout/search";
 import { NotificationsBell } from "@/components/layout/notifications";
+import { useRealtime } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 import type { Role } from "@/lib/types";
 
@@ -24,13 +25,16 @@ function BrandMark() {
 }
 
 function LiveStatus() {
+  const { connected } = useRealtime({});
+  const dotColor = connected ? "bg-primary" : "bg-text-3";
+  const ringColor = connected ? "bg-primary" : "bg-text-3";
   return (
     <span className="hidden items-center gap-2 text-meta font-medium text-text-2 md:flex">
       <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-primary" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+        {connected && <span className={cn("absolute inline-flex h-full w-full animate-pulse-ring rounded-full", ringColor)} />}
+        <span className={cn("relative inline-flex h-2 w-2 rounded-full", dotColor)} />
       </span>
-      Live
+      {connected ? "Live" : "Offline"}
     </span>
   );
 }

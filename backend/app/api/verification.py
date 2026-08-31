@@ -21,7 +21,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from app.api.deps import Db, get_current_user, get_tenant
-from app.core.permissions import AI_CONFIGURE, require_perm
+from app.core.permissions import AI_CONFIGURE, has_perm
+from app.core.errors import InsufficientPrivileges
 from app.models import Tenant, User
 from app.models.custom_tool import TenantCustomTool
 from app.models.kyc import KYCDataSource, KYCRecord, KYCVerificationSession
@@ -78,7 +79,8 @@ def upload_kyc_data(
     tenant: Tenant = Depends(get_tenant),
     user: User = Depends(get_current_user),
 ):
-    require_perm(user, AI_CONFIGURE)
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -135,7 +137,8 @@ def list_kyc_datasources(
     tenant: Tenant = Depends(get_tenant),
     user: User = Depends(get_current_user),
 ):
-    require_perm(user, AI_CONFIGURE)
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
     sources = (
         db.query(KYCDataSource)
         .filter(KYCDataSource.tenant_id == tenant.id)
@@ -168,7 +171,8 @@ def list_kyc_records(
     tenant: Tenant = Depends(get_tenant),
     user: User = Depends(get_current_user),
 ):
-    require_perm(user, AI_CONFIGURE)
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
     ds = db.get(KYCDataSource, ds_id)
     if not ds or ds.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Data source not found")
@@ -235,7 +239,8 @@ def update_doc_verify_template(
     tenant: Tenant = Depends(get_tenant),
     user: User = Depends(get_current_user),
 ):
-    require_perm(user, AI_CONFIGURE)
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
     tool = db.get(TenantCustomTool, tool_id)
     if not tool or tool.tenant_id != tenant.id or tool.tool_type != "doc_verify":
         raise HTTPException(status_code=404, detail="Doc verify tool not found")

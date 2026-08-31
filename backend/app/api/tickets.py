@@ -18,19 +18,15 @@ _AGENT_ALLOWED_STATUSES = {"open", "in_progress", "waiting_for_customer", "waiti
 _CUSTOMER_ALLOWED_STATUSES = {"open", "closed"}
 
 def _check_status_transition(user_role: str, new_status: str) -> None:
-    if user.role == "agent" and new_status not in _AGENT_ALLOWED_STATUSES:
+    if user_role == "agent" and new_status not in _AGENT_ALLOWED_STATUSES:
         raise InsufficientPrivileges(f"Agents cannot set status to '{new_status}'")
 
 
 def _log_ticket_event(db, ticket, user, event_type, field=None, old_value=None, new_value=None, detail=None):
-    db.add(TicketEvent(
-        ticket_id=ticket.id, tenant_id=ticket.tenant_id,
-        actor_id=user.id, actor_name=user.full_name,
-        event_type=event_type, field=field,
-        old_value=str(old_value) if old_value is not None else None,
-        new_value=str(new_value) if new_value is not None else None,
-        detail=detail,
-    ))
+    from app.services.ticket_activity import record
+    record(db, ticket.id, ticket.tenant_id, user.full_name, event_type,
+           actor_id=user.id, field=field, old_value=old_value,
+           new_value=new_value, detail=detail)
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
@@ -64,6 +60,7 @@ class TicketUpdate(BaseModel):
     unread: bool | None = None
     internal_note: str | None = None
     internal_note_attachments: list[dict] | None = None
+    ai_paused: bool | None = None  # hand the thread back to the bot / take over
 
 
 class TicketCreate(BaseModel):
@@ -270,17 +267,24 @@ def list_tickets(
     # loading ALL messages via selectinload (the #1 perf killer).
     if tickets:
         ticket_ids = [t.id for t in tickets]
-        last_msgs = (
+        subq = (
             db.query(
                 Message.ticket_id,
                 Message.body,
+                func.row_number().over(
+                    partition_by=Message.ticket_id,
+                    order_by=Message.timestamp.desc(),
+                ).label("rn"),
             )
             .filter(Message.ticket_id.in_(ticket_ids))
-            .order_by(Message.ticket_id, Message.timestamp.desc())
-            .distinct(Message.ticket_id)
+            .subquery()
+        )
+        last_msgs = (
+            db.query(subq.c.ticket_id, subq.c.body)
+            .filter(subq.c.rn == 1)
             .all()
         )
-        last_msg_map: dict[str, Message] = {}
+        last_msg_map: dict[str, str] = {}
         for mid, body in last_msgs:
             last_msg_map[mid] = body  # store body string directly for preview
         # Attach as a lightweight attribute so ticket_list_dto can read it.
@@ -326,6 +330,9 @@ def create_ticket(body: TicketCreate, db: Db, tenant: Tenant = Depends(get_tenan
     ))
     db.commit()
     db.refresh(ticket)
+    _log_ticket_event(db, ticket, user, "ticket_created",
+                      detail=f"Ticket created via {channel} for {customer.full_name or email} — “{ticket.subject}”")
+    db.commit()
     publish_event("ticket_created", {"ticket_id": ticket.id, "email": email})
     return ticket_dto(ticket)
 
@@ -361,6 +368,9 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
                   user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
     ticket = _get_scoped_ticket(db, tenant, ticket_id)
     patch = body.model_dump(exclude_unset=True)
+    _new_system_msgs: list[Message] = []
+    _escalated = False
+    _assigned_to_id: str | None = None
 
     if user.role == "agent":
         membership = db.query(TenantMember).filter(
@@ -385,12 +395,16 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             ticket.status = body.status
             _log_ticket_event(db, ticket, user, "status_changed",
                               field="status", old_value=old_status, new_value=body.status)
-            db.add(Message(
+            _status_msg = Message(
                 ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
                 sender_name=user.full_name,
                 body=f"Status changed to {body.status.replace('_', ' ')}",
                 is_bot=False, is_read=True,
-            ))
+            )
+            db.add(_status_msg)
+            _new_system_msgs.append(_status_msg)
+            if body.status == "escalated":
+                _escalated = True
         if body.status in ("resolved", "closed"):
             ticket.resolved_at = ticket.resolved_at or datetime.utcnow()
     if "assignee_id" in patch:
@@ -411,13 +425,16 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             new_name = new_assignee.full_name if new_assignee else "Unassigned"
             _log_ticket_event(db, ticket, user, "assignee_changed",
                               field="assignee", old_value=old_assignee_name, new_value=new_name)
-            db.add(Message(
+            _assign_msg = Message(
                 ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
                 sender_name=user.full_name,
                 body=(f"Assigned to {new_assignee.full_name}"
                       if new_assignee else "Unassigned"),
                 is_bot=False, is_read=True,
-            ))
+            )
+            db.add(_assign_msg)
+            _new_system_msgs.append(_assign_msg)
+            _assigned_to_id = body.assignee_id
         if new_assignee and new_assignee.id != user.id:
             db.add(Notification(
                 tenant_id=tenant.id, user_id=new_assignee.id, type=NotificationType.TICKET_ASSIGNED,
@@ -431,27 +448,79 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             if not new_team or new_team.tenant_id != tenant.id:
                 raise TicketNotFound("Team not found")
         if ticket.team_id != body.team_id:
+            old_team_name = ticket.team.name if ticket.team else "No team"
             ticket.team_id = body.team_id
-            db.add(Message(
+            _log_ticket_event(db, ticket, user, "team_changed",
+                              field="team", old_value=old_team_name,
+                              new_value=new_team.name if new_team else "No team")
+            _team_msg = Message(
                 ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
                 sender_name=user.full_name,
                 body=(f"Assigned to team {new_team.name}" if new_team else "Removed from team"),
                 is_bot=False, is_read=True,
-            ))
+            )
+            db.add(_team_msg)
+            _new_system_msgs.append(_team_msg)
     if "unread" in patch:
         ticket.unread = body.unread
-    if body.labels is not None:
-        ticket.labels = _resolve_labels(db, tenant, body.labels)
-    if body.label_ids is not None:
-        _apply_label_ids(db, tenant, ticket, body.label_ids)
+    if "ai_paused" in patch and body.ai_paused is not None:
+        new_val = bool(body.ai_paused)
+        if bool(getattr(ticket, "ai_paused", False)) != new_val:
+            ticket.ai_paused = new_val
+            _log_ticket_event(db, ticket, user, "ai_control",
+                              field="ai_paused",
+                              old_value="off" if new_val else "on",
+                              new_value="on" if new_val else "off",
+                              detail=("AI paused — human took over the conversation"
+                                      if new_val else
+                                      f"AI re-enabled by {user.full_name} — the bot will reply again"))
+            _ai_msg = Message(
+                ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
+                sender_name=user.full_name,
+                body=("AI assistant paused — a human agent is handling this conversation."
+                      if new_val else
+                      f"AI assistant re-enabled by {user.full_name}."),
+                is_bot=False, is_read=True,
+            )
+            db.add(_ai_msg)
+            _new_system_msgs.append(_ai_msg)
+            publish_event("ticket_updated", {"ticket_id": ticket.id})
+    if body.labels is not None or body.label_ids is not None:
+        old_labels = ", ".join(sorted(l.name for l in ticket.labels)) or "none"
+        if body.labels is not None:
+            ticket.labels = _resolve_labels(db, tenant, body.labels)
+        if body.label_ids is not None:
+            _apply_label_ids(db, tenant, ticket, body.label_ids)
+        new_labels = ", ".join(sorted(l.name for l in ticket.labels)) or "none"
+        if new_labels != old_labels:
+            _log_ticket_event(db, ticket, user, "label_changed",
+                              field="labels", old_value=old_labels, new_value=new_labels)
     if body.internal_note:
-        db.add(Message(
+        _note_msg = Message(
             ticket_id=ticket.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
             sender_name=user.full_name, body=body.internal_note, is_bot=False, is_read=True,
             attachments=json.dumps(body.internal_note_attachments) if body.internal_note_attachments else None,
-        ))
+        )
+        db.add(_note_msg)
+        _new_system_msgs.append(_note_msg)
+        _log_ticket_event(db, ticket, user, "note_added",
+                          detail=f"Internal note: \u201c{body.internal_note[:120]}\u201d")
     db.commit()
     db.refresh(ticket)
+    for _sys_msg in _new_system_msgs:
+        db.refresh(_sys_msg)
+        publish_event("message_created", {
+            "ticket_id": ticket.id, "message_id": _sys_msg.id,
+            "who": "system", "text": _sys_msg.body,
+            "author": _sys_msg.sender_name, "kind": "note",
+        })
+    if _escalated:
+        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": "escalated"})
+    if _assigned_to_id is not None:
+        publish_event("ticket_assigned", {
+            "ticket_id": ticket.id, "assignee_id": _assigned_to_id,
+            "assigned_by": user.id, "assigned_by_name": user.full_name,
+        })
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     return ticket_dto(ticket)
 
@@ -475,6 +544,13 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
     db.add(msg)
     if ticket.status == TicketStatus.OPEN:
         ticket.status = TicketStatus.IN_PROGRESS
+    # Human ownership: an actual agent reply hands the conversation from AI
+    # to the human for good — the bot stays quiet until re-enabled.
+    if sender_type_enum == MessageSender.HUMAN_AGENT and not getattr(ticket, "ai_paused", False):
+        ticket.ai_paused = True
+        _log_ticket_event(db, ticket, user, "ai_control",
+                          field="ai_paused", old_value="on", new_value="off",
+                          detail=f"AI paused — {user.full_name} replied and took over the conversation")
     # Bump updated_at so the ticket bubbles to the top of inboxes sorted
     # by most-recent-activity (the default sort).
     ticket.updated_at = datetime.utcnow()
@@ -483,13 +559,21 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
     # row — otherwise the optimistic bubble is wiped by the stale fetch.
     db.commit()
     db.refresh(msg)
-    publish_event("message_created", {
+    _log_ticket_event(db, ticket, user,
+                      "note_added" if sender_type_enum == MessageSender.SYSTEM else "reply_added",
+                      detail=("Internal note: " if sender_type_enum == MessageSender.SYSTEM else "Reply: ")
+                      + f"\u201c{body.body[:120]}\u201d")
+    event_data: dict = {
         "ticket_id": ticket.id,
+        "message_id": msg.id,
         "who": sender_type_str,
         "text": body.body,
         "author": user.full_name,
         "attachments": body.attachments or [],
-    })
+    }
+    if sender_type_enum == MessageSender.SYSTEM:
+        event_data["kind"] = "note"
+    publish_event("message_created", event_data)
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     from app.services.channels.outbound import dispatch_outbound
 
@@ -517,6 +601,12 @@ def update_message(ticket_id: str, message_id: str, body: MessageUpdate, db: Db,
         msg.attachments = json.dumps(body.attachments) if body.attachments else None
     db.commit()
     db.refresh(msg)
+    _log_ticket_event(db, ticket, user, "message_edited",
+                      detail=f'Message edited: "{body.body[:120]}"')
+    publish_event("message_updated", {
+        "ticket_id": ticket.id, "message_id": message_id,
+        "body": body.body, "edited": True,
+    })
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     return message_dto(msg)
 
@@ -531,8 +621,11 @@ def delete_message(ticket_id: str, message_id: str, db: Db,
         raise TicketNotFound("Message not found")
     if msg.sender_type != MessageSender.HUMAN_AGENT:
         raise TicketNotFound("Only agent messages can be deleted")
+    deleted_body = msg.body[:120] if msg.body else ""
     db.delete(msg)
     db.commit()
+    _log_ticket_event(db, ticket, user, "message_deleted",
+                      detail=f'Message deleted: "{deleted_body}"')
     publish_event("message_deleted", {"ticket_id": ticket.id, "message_id": message_id})
     return {"ok": True}
 
@@ -616,38 +709,56 @@ def unsnooze_ticket(ticket_id: str, db: Db,
 # ── Merge ────────────────────────────────────────────────────────
 
 class MergeRequest(BaseModel):
-    primary_ticket_id: str
+    primary_ticket_id: str | None = None  # legacy single-merge field
+    merge_ids: list[str] = Field(default_factory=list)  # tickets folded INTO this one
 
 
 @router.post("/{ticket_id}/merge")
 def merge_ticket(ticket_id: str, body: MergeRequest, db: Db,
                  tenant: Tenant = Depends(get_tenant),
                  user: User = Depends(require_perm(TICKETS_MANAGE))) -> dict:
-    ticket = _get_scoped_ticket(db, tenant, ticket_id)
-    primary = _get_scoped_ticket(db, tenant, body.primary_ticket_id)
-    if ticket.id == primary.id:
-        raise TicketNotFound("Cannot merge a ticket into itself")
-    # Move messages from secondary to primary
-    for msg in ticket.messages:
-        msg.ticket_id = primary.id
-    # Transfer labels
-    for lbl in ticket.labels:
-        if lbl not in primary.labels:
-            primary.labels.append(lbl)
-    ticket.merged_into_id = primary.id
-    ticket.status = "closed"
-    _log_ticket_event(db, primary, user, "ticket_merged",
-                      detail=f"Ticket {format_ticket_number(ticket)} merged into this ticket")
-    db.add(Message(
-        ticket_id=primary.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
-        sender_name=user.full_name,
-        body=f"Ticket {format_ticket_number(ticket)} was merged into this conversation",
-        is_bot=False, is_read=True,
-    ))
+    primary = _get_scoped_ticket(db, tenant, ticket_id)
+
+    # Accept the current ticket as PRIMARY and fold every listed ticket into
+    # it. Legacy callers that passed primary_ticket_id still work.
+    secondary_ids = [i for i in body.merge_ids if i]
+    if body.primary_ticket_id:
+        secondary_ids.append(body.primary_ticket_id)
+    secondary_ids = [i for i in dict.fromkeys(secondary_ids) if i != primary.id]
+    if not secondary_ids:
+        raise TicketNotFound("No tickets selected to merge")
+
+    merged_numbers: list[str] = []
+    for sec_id in secondary_ids:
+        sec = _get_scoped_ticket(db, tenant, sec_id)
+        # Move messages from secondary to primary
+        for msg in sec.messages:
+            msg.ticket_id = primary.id
+        # Transfer labels
+        for lbl in sec.labels:
+            if lbl not in primary.labels:
+                primary.labels.append(lbl)
+        sec.merged_into_id = primary.id
+        sec.status = "closed"
+        num = format_ticket_number(sec)
+        merged_numbers.append(num)
+        _log_ticket_event(db, primary, user, "ticket_merged",
+                          detail=f"Ticket {num} merged into this conversation")
+        _log_ticket_event(db, sec, user, "ticket_merged_away",
+                          detail=f"Merged into ticket {format_ticket_number(primary)} — this conversation is closed")
+        db.add(Message(
+            ticket_id=primary.id, sender_id=user.id, sender_type=MessageSender.SYSTEM,
+            sender_name=user.full_name,
+            body=f"Ticket {num} was merged into this conversation",
+            is_bot=False, is_read=True,
+        ))
+
     db.commit()
     db.refresh(primary)
     publish_event("ticket_updated", {"ticket_id": primary.id, "status": primary.status})
-    return ticket_dto(primary)
+    for sid in secondary_ids:
+        publish_event("ticket_updated", {"ticket_id": sid})
+    return {"ticket": ticket_dto(primary), "merged_count": len(merged_numbers), "merged": merged_numbers}
 
 
 # ── Activity Timeline ────────────────────────────────────────────

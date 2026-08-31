@@ -25,6 +25,10 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     presence_status: Mapped[str] = mapped_column(String(20), default="offline")
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    sso_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sso_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tenant: Mapped["Tenant | None"] = relationship(back_populates="users")  # noqa: F821

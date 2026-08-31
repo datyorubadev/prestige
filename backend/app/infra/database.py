@@ -176,12 +176,14 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("ai_tokens_used", "INTEGER DEFAULT 0"),
         ("ai_tokens_limit", "INTEGER DEFAULT 1000000"),
         ("ai_system_prompt", "TEXT"),
+        ("timezone", "VARCHAR(64) DEFAULT 'Africa/Lagos'"),
         ("display_image", "VARCHAR(500)"),
     ],
     "tickets": [
         ("team_id", "VARCHAR(36)"),
         ("csat_comment", "VARCHAR(500)"),
         ("display_number", "VARCHAR(32)"),
+        ("ai_paused", "BOOLEAN DEFAULT 0"),
     ],
     "tenant_custom_tools": [
         ("body_template", "TEXT"),

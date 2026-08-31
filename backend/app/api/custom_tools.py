@@ -354,6 +354,7 @@ class ToolTestRequest(BaseModel):
     urlTemplate: str
     headers: dict[str, str] = Field(default_factory=dict)
     bodyTemplate: str | None = None
+    responseExtractor: str | None = None
     testArgs: dict[str, Any] = Field(default_factory=dict)
 
 

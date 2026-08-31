@@ -21,13 +21,17 @@ interface UseRealtimeOptions {
 
 let sharedSocket: WebSocket | null = null;
 let sharedPoll: ReturnType<typeof setInterval> | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let sharedConnected = false;
 let sharedDisposed = false;
-let authRetried = false;
+let lastAuthRetry = 0;
+let reconnectDelay = 1_000;
 const subscribers = new Map<number, Record<string, RealtimeHandler>>();
 let nextId = 1;
 let cursorRef: string | null = null;
 const connectionListeners = new Set<(connected: boolean) => void>();
+
+const AUTH_RETRY_COOLDOWN = 10_000;
 
 function setConnected(v: boolean) {
   sharedConnected = v;
@@ -52,8 +56,10 @@ function startPolling() {
   setConnected(false);
   sharedPoll = setInterval(async () => {
     try {
+      const token = await ensureFreshAccessToken().catch(() => null);
       const res = await fetch(
         `${API_BASE}/events${cursorRef ? `?since=${encodeURIComponent(cursorRef)}` : ""}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
       if (!res.ok) return;
       const list = (await res.json()) as EventBusEnvelope[];
@@ -69,6 +75,13 @@ function startPolling() {
   }, 10_000);
 }
 
+function stopPolling() {
+  if (sharedPoll) {
+    clearInterval(sharedPoll);
+    sharedPoll = null;
+  }
+}
+
 function openSocket(token: string | null) {
   const url = `${wsEndpoint("/ws/events")}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
   let socket: WebSocket;
@@ -76,48 +89,66 @@ function openSocket(token: string | null) {
     socket = new WebSocket(url);
   } catch {
     startPolling();
+    scheduleReconnect();
     return;
   }
   sharedSocket = socket;
-  socket.onopen = () => setConnected(true);
+  socket.onopen = () => {
+    reconnectDelay = 1_000; // healthy again
+    stopPolling(); // live socket wins; polling was only a bridge
+    setConnected(true);
+  };
   socket.onmessage = (m) => dispatch(String(m.data));
   socket.onerror = () => socket.close();
   socket.onclose = (e) => {
     if (sharedSocket === socket) sharedSocket = null;
     if (sharedDisposed) return;
-    if (e.code === 4401 || e.code === 4403 || e.code === 1008) {
-      void refreshAndReconnect();
+    setConnected(false);
+    // Poll as a bridge while we work to restore the socket.
+    startPolling();
+    const authFailure = e.code === 4401 || e.code === 4403 || e.code === 1008;
+    if (authFailure && Date.now() - lastAuthRetry > AUTH_RETRY_COOLDOWN) {
+      lastAuthRetry = Date.now();
+      void (async () => {
+        const fresh = await ensureFreshAccessToken().catch(() => null);
+        if (!sharedDisposed) reopen(fresh);
+      })();
       return;
     }
-    startPolling();
+    scheduleReconnect();
   };
 }
 
-const refreshAndReconnect = async () => {
-  if (authRetried) {
-    startPolling();
-    return;
-  }
-  authRetried = true;
-  const token = await ensureFreshAccessToken().catch(() => null);
-  if (sharedDisposed) return;
-  if (!token) {
-    startPolling();
-    return;
-  }
+/** Re-open the WebSocket after `reconnectDelay` ms with capped backoff. */
+function scheduleReconnect() {
+  if (sharedDisposed || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (sharedDisposed || subscribers.size === 0) return;
+    void (async () => {
+      const token = await ensureFreshAccessToken().catch(() => null);
+      if (!sharedDisposed) reopen(token);
+    })();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 10_000);
+}
+
+function reopen(token: string | null) {
+  if (sharedSocket && sharedSocket.readyState <= WebSocket.OPEN) return;
   openSocket(token);
-};
+}
 
 function ensureConnection() {
   if (sharedDisposed) return;
   if (subscribers.size === 0) return; // no subscribers, don't connect
-  if (sharedSocket && sharedSocket.readyState < WebSocket.CLOSING) return; // already open/opening
-  if (sharedPoll) return; // already polling
+  if (sharedSocket && sharedSocket.readyState <= WebSocket.OPEN) return; // open/opening
+  if (reconnectTimer) return; // reconnect already scheduled
 
   void (async () => {
     const token = await ensureFreshAccessToken().catch(() => null);
     if (sharedDisposed || subscribers.size === 0) return;
-    openSocket(token);
+    if (sharedSocket && sharedSocket.readyState <= WebSocket.OPEN) return;
+    openSocket(token); // polling starts automatically if it fails
   })();
 }
 
@@ -126,9 +157,10 @@ function teardownIfIdle() {
   sharedDisposed = true;
   sharedSocket?.close();
   sharedSocket = null;
-  if (sharedPoll) {
-    clearInterval(sharedPoll);
-    sharedPoll = null;
+  stopPolling();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
   setConnected(false);
 }

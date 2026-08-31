@@ -12,6 +12,7 @@ Scaling note for 20K concurrent users:
 """
 
 import os
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "__all__")
 import uvicorn
 
 if __name__ == "__main__":

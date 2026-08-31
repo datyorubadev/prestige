@@ -15,7 +15,17 @@ interface Draft {
   name: string;
   email: string;
   city: string;
+  timezone: string;
 }
+
+const TIMEZONES = [
+  "Africa/Lagos", "Africa/Abidjan", "Africa/Accra", "Africa/Cairo",
+  "Africa/Johannesburg", "Africa/Nairobi", "America/New_York", "America/Chicago",
+  "America/Denver", "America/Los_Angeles", "America/Sao_Paulo", "Asia/Dubai",
+  "Asia/Kolkata", "Asia/Jakarta", "Asia/Manila", "Asia/Singapore", "Asia/Tokyo",
+  "Australia/Sydney", "Europe/Berlin", "Europe/Istanbul", "Europe/London",
+  "Europe/Paris", "UTC",
+];
 
 export function GeneralTab() {
   const { user } = useAuth();
@@ -33,7 +43,10 @@ export function GeneralTab() {
       .then((t) => {
         if (!active) return;
         setTenant(t);
-        setDraft({ name: t.name, email: t.email, city: t.city });
+        setDraft({
+          name: t.name, email: t.email, city: t.city,
+          timezone: (t as any).timezone || "Africa/Lagos",
+        });
       })
       .catch(() => {});
     return () => {
@@ -52,6 +65,7 @@ export function GeneralTab() {
         name: draft.name.trim(),
         email: draft.email.trim(),
         city: draft.city.trim(),
+        timezone: draft.timezone,
       });
       setTenant(updated);
       toast("Workspace details saved");
@@ -123,6 +137,22 @@ export function GeneralTab() {
                 className="input-control"
               />
             </Field>
+            <label className="block">
+              <span className="mb-1.5 block text-micro uppercase text-text-3">Timezone</span>
+              <select
+                value={draft.timezone}
+                onChange={(e) => set({ timezone: e.target.value })}
+                aria-label="Tenant timezone"
+                className="input-control"
+              >
+                {TIMEZONES.map((tz) => (
+                  <option key={tz} value={tz}>{tz}</option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[11px] text-text-3">
+              All timestamps across the app, exports and reports render in this timezone.
+            </p>
             <div className="rounded-sm border border-border bg-surface-2 px-3 py-2.5 text-[11.5px] text-text-3">
               Widget URL uses your slug:{" "}
               <code className="font-mono text-code text-text-2">

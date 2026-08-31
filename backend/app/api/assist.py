@@ -26,6 +26,10 @@ class ApproveRequest(BaseModel):
     payload: dict
 
 
+class AnswerRequest(BaseModel):
+    answer: str
+
+
 def _sse(frame: dict) -> str:
     return f"data: {json.dumps(frame)}\n\n"
 
@@ -107,3 +111,26 @@ async def assist_approve(ticket_id: str, body: ApproveRequest,
         raise TenantNotFound("Ticket not found")
     _ensure_owned(ticket, user)
     return await agent.resume_agent(ticket.id, body.payload)
+
+
+@router.post("/{ticket_id}/answer")
+async def assist_answer(ticket_id: str, body: AnswerRequest,
+                        db: Db, tenant: Tenant = Depends(get_tenant), user: User = Depends(require_team)):
+    """Agent answers a KB-gap question (soft human assist). The reply is
+    delivered to the customer as the bot's own message. Guard: only works when
+    the ticket currently has a pending human_assist interrupt."""
+    ticket = _resolve_ticket(db, tenant, ticket_id)
+    if not ticket:
+        raise TenantNotFound("Ticket not found")
+    _ensure_owned(ticket, user)
+
+    pending = await agent.pending_approval(ticket.id)
+    if not pending:
+        return {"ok": False, "error": "no_pending_assist"}
+    if (pending or {}).get("type") != "human_assist":
+        return {"ok": False, "error": "not_a_human_assist"}
+    answer = (body.answer or "").strip()
+    if not answer:
+        return {"ok": False, "error": "empty_answer"}
+    result = await agent.resume_agent(ticket.id, {"answer": answer})
+    return {"ok": result.get("ok", False), "reply": result.get("reply")}

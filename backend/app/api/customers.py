@@ -15,6 +15,7 @@ from app.core.errors import InsufficientPrivileges, TicketNotFound
 from app.core.permissions import CUSTOMERS_MANAGE, CUSTOMERS_VIEW, require_perm
 from app.models import Customer, Tenant, Ticket, User
 from app.services.serializers import customer_dto, format_ticket_number, ticket_dto
+from app.services.tz import fmt_in_tz
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -70,7 +71,7 @@ def get_past_tickets(
             "ticketNumber": format_ticket_number(t),
             "display_number": format_ticket_number(t),
             "subject": t.subject,
-            "date": t.created_at.strftime("%b %d, %Y") if t.created_at else "Recently",
+            "date": fmt_in_tz(t.created_at, "%b %d, %Y", tenant) if t.created_at else "Recently",
             "status": t.status,
             "sentiment": t.sentiment or "Neutral",
             "email": t.customer.email if t.customer else clean_email,

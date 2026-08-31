@@ -45,7 +45,8 @@ export function CustomerChat({ tenantId, initialEmail }: { tenantId: string; ini
         const ticketId = String(ev.data?.ticket_id ?? "");
         if (!ticketId) return;
         const text = String(ev.data?.text ?? "");
-        const who = String(ev.data?.who ?? "agent");
+        let who = String(ev.data?.who ?? "agent");
+        if (who === "ai") who = "ai_bot";
         const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as any[]) : [];
         if (!text && !attachments.length) return;
         setTickets((prev) =>
@@ -175,6 +176,7 @@ export function CustomerChat({ tenantId, initialEmail }: { tenantId: string; ini
         try {
           await stream.send({
             ticketId: targetId,
+            sessionId: targetId,
             query: text,
             tone: "professional",
             onToken: (tok) => {
@@ -193,7 +195,7 @@ export function CustomerChat({ tenantId, initialEmail }: { tenantId: string; ini
             },
             onDone: () => {
               if (acc) {
-                void api.post("/widget/persist", { ticketId: targetId, text: acc }).catch(() => {});
+                void api.post("/widget/persist", { ticketId: targetId, sessionId: targetId, text: acc }).catch(() => {});
               } else {
                 // If stream was empty, update with helpful fallback
                 setTickets((prev) =>
@@ -616,7 +618,7 @@ function CustomerBubble({
     );
   }
 
-  if (message.who === "ai_bot") {
+  if (message.who === "ai_bot" || message.who === "ai") {
     const textContent = message.text?.trim() || "I'm looking into this for you. An agent has also been notified.";
     return (
       <div className="flex items-end gap-2">

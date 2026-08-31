@@ -14,6 +14,7 @@ import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { useRealtime } from "@/lib/realtime";
+import { useUrlState } from "@/lib/use-url-state";
 import type {
   AgentUser,
   Label,
@@ -85,16 +86,26 @@ export function TicketList() {
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
   const [agents, setAgents] = useState<AgentUser[]>([]);
   const [labels, setLabels] = useState<Label[]>([]);
-  const [view, setView] = useState<QueueFilter>("All");
-  const [query, setQuery] = useState(() => searchParams.get("email") ?? "");
+  // Queue state persists in the URL (?view=&q=&status=&priority=&assignee=
+  // &channel=&label=&sort=&page=) so navigating away/back or refreshing
+  // restores the exact view. `?email=` still seeds the search once.
+  const [viewRaw, setViewRaw] = useUrlState(
+    "view",
+    searchParams.get("mine") === "true" ? "Mine" : "All",
+  );
+  const view = viewRaw as QueueFilter;
+  const setView = setViewRaw as (v: QueueFilter) => void;
+  const [query, setQuery] = useState(() => searchParams.get("email") ?? searchParams.get("q") ?? "");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [status, setStatus] = useState("");
-  const [priority, setPriority] = useState("");
-  const [assignee, setAssignee] = useState("");
-  const [channel, setChannel] = useState("");
-  const [label, setLabel] = useState("");
-  const [sortKey, setSortKey] = useState("newest");
-  const [page, setPage] = useState(1);
+  const [status, setStatus] = useUrlState("status", "");
+  const [priority, setPriority] = useUrlState("priority", "");
+  const [assignee, setAssignee] = useUrlState("assignee", "");
+  const [channel, setChannel] = useUrlState("channel", "");
+  const [label, setLabel] = useUrlState("label", "");
+  const [sortKey, setSortKey] = useUrlState("sort", "newest");
+  const [pageRaw, setPageRaw] = useUrlState("page", "1");
+  const page = Math.max(1, parseInt(pageRaw, 10) || 1);
+  const setPage = useCallback((p: number) => setPageRaw(String(Math.max(1, p))), [setPageRaw]);
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);

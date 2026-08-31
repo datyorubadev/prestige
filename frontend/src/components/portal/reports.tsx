@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState, useMemo, useRef } from "react";
-import { api } from "@/lib/api";
+import { api, API_BASE, ensureFreshAccessToken } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useRealtime } from "@/lib/realtime";
+import { useUrlState } from "@/lib/use-url-state";
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import { BarsChart } from "@/components/dashboard/bars-chart";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
@@ -23,9 +24,12 @@ export function TenantReports() {
   const [agents, setAgents] = useState<AgentUser[]>([]);
   const [tab, setTab] = useState<ReportsTab>("overview");
   const [dateRange, setDateRange] = useState<DateRange>({ preset: "30d", label: "Last 30 days" });
-  const [selectedChannel, setSelectedChannel] = useState<string>("all");
+  // Channel filter lives in the URL (?channel=) and actually re-queries the
+  // backend — every metric below is server-filtered by it.
+  const [selectedChannel, setSelectedChannel] = useUrlState("channel", "all");
   const [exportOpen, setExportOpen] = useState(false);
   const [channelOpen, setChannelOpen] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   const channelRef = useRef<HTMLDivElement>(null);
   const exportRef = useRef<HTMLDivElement>(null);
@@ -49,7 +53,10 @@ export function TenantReports() {
   const load = useCallback(() => {
     let active = true;
     const daysParam = dateRange.preset === "today" ? 1 : dateRange.preset === "7d" ? 7 : dateRange.preset === "14d" ? 14 : dateRange.preset === "30d" ? 30 : dateRange.preset === "90d" ? 90 : undefined;
-    const url = daysParam ? `/reports?days=${daysParam}` : "/reports";
+    const qs = new URLSearchParams();
+    if (daysParam) qs.set("days", String(daysParam));
+    if (selectedChannel && selectedChannel !== "all") qs.set("channel", selectedChannel);
+    const url = `/reports${qs.toString() ? `?${qs.toString()}` : ""}`;
     void Promise.all([
       api.get<TenantReportMetrics>(url).catch(() => null),
       api.get<AgentUser[]>("/agents").catch(() => []),
@@ -61,7 +68,7 @@ export function TenantReports() {
     return () => {
       active = false;
     };
-  }, [dateRange.preset]);
+  }, [dateRange.preset, selectedChannel]);
 
   useEffect(load, [load]);
 
@@ -137,10 +144,37 @@ export function TenantReports() {
     setExportOpen(false);
   };
 
-  // Print PDF Handler
-  const exportPdf = () => {
-    window.print();
+  // Print PDF Handler — fetches the server-rendered A4 report document
+  // (exec summary, AI/SLA/agent/CSAT sections) and opens it in a print-ready
+  // tab. The document auto-triggers the print dialog on load.
+  const exportPdf = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true);
     setExportOpen(false);
+    try {
+      const daysParam = dateRange.preset === "today" ? 1 : dateRange.preset === "7d" ? 7 : dateRange.preset === "14d" ? 14 : dateRange.preset === "30d" ? 30 : dateRange.preset === "90d" ? 90 : undefined;
+      const qs = new URLSearchParams();
+      if (daysParam) qs.set("days", String(daysParam));
+      if (selectedChannel && selectedChannel !== "all") qs.set("channel", selectedChannel);
+      const token = await ensureFreshAccessToken().catch(() => null);
+      const res = await fetch(`${API_BASE}/reports/pdf${qs.toString() ? `?${qs.toString()}` : ""}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const html = await res.text();
+      const w = window.open("", "_blank");
+      if (!w) {
+        toast("Allow pop-ups to export the PDF report", "danger");
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } catch {
+      toast("Could not generate the PDF report", "danger");
+    } finally {
+      setPdfBusy(false);
+    }
   };
 
   const agentColumns: Column<TenantReportMetrics["leaderboard"][0] & { rank?: number }>[] = [
@@ -194,6 +228,7 @@ export function TenantReports() {
     { value: "chat", label: "Web Chat Widget" },
     { value: "portal", label: "Customer Portal" },
     { value: "email", label: "Email Support" },
+    { value: "whatsapp", label: "WhatsApp" },
   ];
 
   const isOwner = user?.role === "owner" || user?.role === "super_admin";
@@ -301,10 +336,11 @@ export function TenantReports() {
                 <button
                   type="button"
                   onClick={exportPdf}
-                  className="menu-item flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] font-medium text-text outline-none"
+                  disabled={pdfBusy}
+                  className="menu-item flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] font-medium text-text outline-none disabled:opacity-50"
                 >
                   <Icon name="printer" size={14} className="text-violet-600" />
-                  <span>Print PDF Summary</span>
+                  <span>{pdfBusy ? "Building report…" : "Export PDF Report"}</span>
                 </button>
               </div>
             )}

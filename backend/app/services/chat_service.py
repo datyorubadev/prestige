@@ -55,14 +55,26 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
     ticket.unread = True
     db.flush()
 
+    from app.services.ticket_activity import record
+    record(db, ticket.id, tenant.id, ticket.customer.full_name if ticket.customer else "Customer",
+           "customer_replied" if session_id else "ticket_created",
+           detail=f"Customer message: “{text[:120]}”")
+
+    # Burst buffering: register the message so the AI waits for a quiet
+    # window and merges rapid-fire messages into one reply.
+    from app.services.chat_buffer import chat_buffer
+    chat_buffer.add(ticket.id, text)
+
     fired = escalation.evaluate(db, tenant, ticket, text)
     if fired:
         escalation.apply(db, tenant, ticket, fired)
     else:
         db.commit()
+    db.refresh(msg)
     db.refresh(ticket)
     publish_event("message_created", {
         "ticket_id": ticket.id,
+        "message_id": msg.id,
         "who": "customer",
         "text": text,
         "attachments": attachments or [],
@@ -72,6 +84,8 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
     return {
         "ticket": ticket_dto(ticket),
         "sessionId": ticket.id,
+        "ticketId": ticket.id,
+        "tenantId": tenant.id,
         "fired": [rule_dto(r) for r in fired],
         "escalated": bool(fired),
         "tone": tenant.brand_tone,
@@ -95,7 +109,13 @@ def persist_ai_reply(db: Session, ticket_id: str, text: str) -> dict:
     db.add(msg)
     ticket.unread = True
     db.commit()
-    publish_event("message_created", {"ticket_id": ticket.id, "who": "ai", "text": text})
+    db.refresh(msg)
+    from app.services.ticket_activity import record
+    record(db, ticket.id, ticket.tenant_id,
+           tenant.bot_name if tenant else "AI Assistant", "ai_replied",
+           detail=f"AI reply: “{text[:120]}”")
+    db.commit()
+    publish_event("message_created", {"ticket_id": ticket.id, "message_id": msg.id, "who": "ai", "text": text})
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     return {"ok": True}
 
@@ -107,5 +127,9 @@ def rate_ticket(db: Session, ticket_id: str, rating: int, comment: str | None = 
     ticket.csat_rating = max(1, min(5, rating))
     if comment is not None:
         ticket.csat_comment = comment[:500]
+    from app.services.ticket_activity import record
+    record(db, ticket.id, ticket.tenant_id, "Customer", "csat_rated",
+           new_value=f"{ticket.csat_rating}/5",
+           detail=f"CSAT rated {ticket.csat_rating}/5" + (f' — “{comment[:120]}”' if comment else ""))
     db.commit()
     return {"ok": True}

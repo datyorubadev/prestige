@@ -12,7 +12,7 @@ import type { ChatStreamFrame, Tenant, Ticket, WidgetAttachment, WidgetSendResul
 import { cn } from "@/lib/utils";
 
 interface WidgetMsg {
-  who: "customer" | "ai" | "system" | "agent";
+  who: "customer" | "ai" | "ai_bot" | "system" | "agent" | "human_agent";
   text: string;
   attachments?: WidgetAttachment[];
 }
@@ -71,6 +71,7 @@ export function WidgetChat({
   const [teaser, setTeaser] = useState(false);
   const [handoff, setHandoff] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [humanAssistPending, setHumanAssistPending] = useState(false);
   const [csat, setCsat] = useState<"hidden" | "prompt" | "comment" | "done">("hidden");
   const [mobile, setMobile] = useState(false);
   const isMobileView = !isEmbed && (mobile || isMobileFrame);
@@ -78,6 +79,10 @@ export function WidgetChat({
   const [agentName, setAgentName] = useState("Support team");
   const [muted, setMuted] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  /** Reactive agentsOnline count — seeded from the tenant prop, updated via realtime agent_presence events. */
+  const [agentsOnline, setAgentsOnline] = useState(tenant.agentsOnline ?? 0);
+  // Keep in sync if the parent re-fetches tenant data
+  useEffect(() => { setAgentsOnline(tenant.agentsOnline ?? 0); }, [tenant.agentsOnline]);
   const teaserShownRef = useRef(false);
   const aiRepliesRef = useRef(0);
   /** True while an AI turn is in flight (ref — avoids stale-closure gating). */
@@ -123,7 +128,10 @@ export function WidgetChat({
     {
       message_created: (ev) => {
         const text = String(ev.data?.text ?? "");
-        const who = String(ev.data?.who ?? "agent") as "customer" | "ai" | "system" | "agent";
+        let rawWho = String(ev.data?.who ?? "agent");
+        if (rawWho === "ai_bot") rawWho = "ai";
+        if (rawWho === "human_agent") rawWho = "agent";
+        const who = rawWho as WidgetMsg["who"];
         const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as WidgetAttachment[]) : [];
         if ((!text && !attachments.length) || who === "customer") return;
         setMsgs((prev) => {
@@ -145,6 +153,22 @@ export function WidgetChat({
           playChime();
         }
       },
+      human_assist_resolved: (ev) => {
+        // A human agent answered a KB-gap question — surface it here as the
+        // bot's reply and drop the "waiting on an agent" indicator.
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!sessionId || tid !== sessionId) return;
+        setHumanAssistPending(false);
+        setPendingApproval(null);
+        if (ev.data?.reply) {
+          const reply = String(ev.data.reply);
+          setMsgs((prev) => {
+            if (prev.some((m) => m.text === reply && m.who === "ai")) return prev;
+            return [...prev, { who: "ai", text: reply }];
+          });
+          playChime();
+        }
+      },
       ticket_escalated: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
         if (!sessionId || tid !== sessionId) return;
@@ -152,6 +176,24 @@ export function WidgetChat({
       },
     },
     { enabled: Boolean(sessionId) },
+  );
+
+  // Track agent presence globally — widget needs this even before a chat starts
+  useRealtime(
+    {
+      agent_presence: (ev) => {
+        // Backend broadcasts agents_online count; use it directly for accuracy
+        const reported = ev.data?.agents_online;
+        if (typeof reported === "number") {
+          setAgentsOnline(reported);
+        } else {
+          // Fallback: adjust by ±1
+          const online = Boolean(ev.data?.online);
+          setAgentsOnline((prev) => Math.max(0, prev + (online ? 1 : -1)));
+        }
+      },
+    },
+    { enabled: true },
   );
 
   // Support external trigger event (e.g. from demo page quick action cards)
@@ -174,6 +216,7 @@ export function WidgetChat({
     setMsgs([]);
     setHandoff(false);
     setPendingApproval(null);
+    setHumanAssistPending(false);
     setCsat("hidden");
     setOfflineEmail("");
   };
@@ -195,10 +238,10 @@ export function WidgetChat({
             `/widget/messages?ticketId=${encodeURIComponent(sessionId)}`,
           );
           const seen = new Set(
-            msgsRef.current.filter((m) => m.who === "ai").map((m) => m.text),
+            msgsRef.current.filter((m) => m.who === "ai" || m.who === "ai_bot").map((m) => m.text),
           );
           const unseen = (res.messages ?? [])
-            .filter((m) => m.who === "ai")
+            .filter((m) => m.who === "ai" || m.who === "ai_bot")
             .map((m) => m.text)
             .filter((t) => t && !seen.has(t));
           if (unseen.length > 0) {
@@ -237,7 +280,7 @@ export function WidgetChat({
   // tenant has agents but none right now, Offline when the queue is empty.
   const presence: Presence =
     presenceOverride ??
-    ((tenant.agentsOnline ?? 0) > 0 ? "online" : (tenant.agents ?? 0) > 0 ? "away" : "offline");
+    (agentsOnline > 0 ? "online" : (tenant.agents ?? 0) > 0 ? "away" : "offline");
   const needsEmail = presence !== "online" && !offlineEmail;
 
   // Guest identity — props win, otherwise the pre-chat profile from /chat or
@@ -410,7 +453,7 @@ export function WidgetChat({
   const ticketMsgs = (ticket: Ticket): WidgetMsg[] =>
     ticket.msgs.map((m) => ({
       who:
-        m.who === "customer" ? ("customer" as const) : m.who === "system" ? ("system" as const) : ("ai" as const),
+        m.who === "customer" ? ("customer" as const) : m.who === "system" ? ("system" as const) : m.who === "human_agent" || m.who === "agent" ? ("agent" as const) : ("ai" as const),
       text: m.text,
       attachments: m.attachments,
     }));
@@ -475,6 +518,7 @@ export function WidgetChat({
         let pushedAi = false;
         await stream.send({
           ticketId: res.sessionId,
+          sessionId: res.sessionId,
           query: text,
           tone: res.tone ?? tone,
           onToken: (tok) => {
@@ -494,11 +538,28 @@ export function WidgetChat({
           },
           onDone: (frame?: ChatStreamFrame) => {
             setTyping(false);
-            if (acc) void api.post("/widget/persist", { ticketId: res.sessionId, text: acc }).catch(() => {});
+            if (!acc && frame?.ai_paused) {
+              // A human agent has taken over this conversation.
+              setHandoff(true);
+              setHumanAssistPending(false);
+              setMsgs((m) => [...m, { who: "system", text: "You're chatting with our support team now." }]);
+            }
+            if (!acc && frame?.error) {
+              // Stream failed (e.g. session rejected) — never leave the
+              // customer staring at a vanished typing indicator.
+              setMsgs((m) => [
+                ...m,
+                { who: "ai", text: "Sorry — I couldn't generate a reply just now. Please try again in a moment." },
+              ]);
+            }
+            if (acc) void api.post("/widget/persist", { ticketId: res.sessionId, sessionId: res.sessionId, text: acc }).catch(() => {});
             setPendingApproval(
               frame?.needs_approval && frame.approval_payload
                 ? frame.approval_payload
                 : null,
+            );
+            setHumanAssistPending(
+              !!frame?.human_assist_pending && !frame?.needs_approval,
             );
             aiRepliesRef.current += 1;
             if (aiRepliesRef.current >= 2 && sessionId) setCsat("prompt");
@@ -680,7 +741,7 @@ export function WidgetChat({
               ? isMobileFrame
                 ? "absolute inset-0 z-50 h-full w-full rounded-[24px]"
                 : "fixed inset-0 z-50 h-[100dvh] w-full rounded-none"
-              : "w-[390px] max-w-[calc(100vw-24px)] h-[580px] max-h-[calc(100dvh-120px)] animate-pop rounded-[20px] mb-2",
+              : "w-[390px] max-w-[calc(100vw-24px)] h-[700px] max-h-[calc(100dvh-80px)] animate-pop rounded-[20px] mb-2",
           )}
         >
           {/* Cover / display image banner (optional, tenant-managed) */}
@@ -763,7 +824,7 @@ export function WidgetChat({
             ref={bodyRef}
             className={cn(
               "flex flex-col gap-2.5 overflow-y-auto bg-slate-50/60 p-4",
-              mobile ? "min-h-0 flex-1" : "max-h-[480px] min-h-[280px] flex-1",
+              mobile ? "min-h-0 flex-1" : "max-h-[600px] min-h-[340px] flex-1",
             )}
           >
             {connecting && (
@@ -817,6 +878,15 @@ export function WidgetChat({
                   <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-warning" />
                 </span>
                 <span>One of our team is confirming this — we&apos;ll update you here.</span>
+              </div>
+            )}
+            {humanAssistPending && !handoff && !pendingApproval && (
+              <div className="flex items-center gap-1.5 self-start rounded-md rounded-bl-[3px] border border-primary-border bg-primary-soft px-3 py-2 text-[12px] text-text-2">
+                <span className="relative flex h-1.5 w-1.5 shrink-0">
+                  <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-primary" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
+                </span>
+                <span>Checking with my team — I&apos;ll be right back with an answer.</span>
               </div>
             )}
             {csatPrompt && (
@@ -986,7 +1056,7 @@ function Bubble({
       </div>
     );
   }
-  if (m.who === "agent") {
+  if (m.who === "agent" || m.who === "human_agent") {
     return (
       <div className={cn("flex max-w-[88%] flex-col gap-1 self-start", grouped && "mt-[-6px]")}>
         <p className="text-[10px] font-bold uppercase tracking-wider text-text-3 pl-1">{agentName}</p>
@@ -1001,7 +1071,7 @@ function Bubble({
       </div>
     );
   }
-  if (m.who === "ai") {
+  if (m.who === "ai" || m.who === "ai_bot") {
     return <BotBubble text={m.text} attachments={m.attachments} onImageClick={onImageClick} />;
   }
   return (

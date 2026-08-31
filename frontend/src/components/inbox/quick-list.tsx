@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { avatarColorFor, cn, ticketNumberFor } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { useRealtime } from "@/lib/realtime";
+import { useUrlState } from "@/lib/use-url-state";
 import type { Ticket } from "@/lib/types";
 
 interface QuickListProps {
@@ -29,7 +30,9 @@ const FILTER_OPTIONS = [
 export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProps) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState("all");
+  // Filter persists in the URL (?filter=mine) so navigating away and back
+  // (or refreshing) restores the exact queue view.
+  const [filter, setFilter] = useUrlState("filter", "all");
   const loaded = useRef(false);
 
   const loadTickets = useCallback(() => {
@@ -78,6 +81,32 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
             return next;
           });
         }
+      },
+      ticket_escalated: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!tid) return;
+        setTickets((prev) => {
+          const idx = prev.findIndex((t) => t.id === tid);
+          if (idx === -1) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], status: "escalated" as Ticket["status"], time: "Just now" };
+          next.splice(idx, 1);
+          next.unshift(next[idx]);
+          return next;
+        });
+      },
+      ticket_assigned: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!tid) return;
+        setTickets((prev) => {
+          const idx = prev.findIndex((t) => t.id === tid);
+          if (idx === -1) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], time: "Just now" };
+          next.splice(idx, 1);
+          next.unshift(next[idx]);
+          return next;
+        });
       },
     },
     { enabled: open },

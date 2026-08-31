@@ -2027,6 +2027,19 @@ export const mockApi = {
       return { ...a };
     }),
 
+  revokeInvite: (agentId: string) =>
+    mutate<AgentUser | null>(() => {
+      const idx = mockDb.agents.findIndex((x) => x.id === agentId);
+      if (idx === -1) return null;
+      const a = mockDb.agents[idx];
+      if (a.invitePending !== true) return null;
+      // Invalidate the invite token
+      delete mockDb.invites[`invite-${a.id}`];
+      // Remove the agent from the roster
+      mockDb.agents.splice(idx, 1);
+      return { ...a };
+    }),
+
   setAgentActive: (agentId: string, active: boolean) =>
     mutate<AgentUser | null>(() => {
       const a = mockDb.agents.find((x) => x.id === agentId);
@@ -2322,6 +2335,13 @@ export interface AgentAssistPending {
   prompt?: string;
   status?: string;
   customer_reply?: string;
+  /** Human-assist fields (type === "human_assist") */
+  question?: string;
+  customer_email?: string;
+  customer_name?: string;
+  ticket_number?: string;
+  bot_name?: string;
+  created_at?: string;
 }
 
 /** Mock approvals awaiting a staff decision, keyed by ticket id. */
@@ -2406,6 +2426,46 @@ export async function mockAgentAssistApprove(
     ? "Approved — the refund has been initiated. The customer sees a confirmation within 24–48 hours."
     : "Declined — no refund was started. I've left a note on the ticket so a human can follow up.";
   emitEvent("agent_approval_resolved", { ticket_id: ticketId, approved, reply });
+  const t = mockDb.tickets.find((x) => x.id.toLowerCase() === ticketId.toLowerCase());
+  if (t) {
+    t.msgs = [...t.msgs, { who: "ai_bot" as const, text: reply }];
+    emitEvent("ticket_updated", { ticket_id: t.id });
+  }
+  return { ok: true, reply };
+}
+
+/** Mock registration for a KB-gap (human assist) question, mirroring the
+ *  backend interrupt. Emits human_assist_pending for the agent dashboard. */
+export function humanAssistFor(ticketId: string, query: string): AgentAssistPending | null {
+  const t = query.toLowerCase();
+  // Simple demo heuristic: treat a long, non-keyworded question as a KB gap.
+  if (/(refund|transfer|status|pin|card|human|agent|track)/.test(t)) return null;
+  if (query.trim().length < 24) return null;
+  const ticket = mockDb.tickets.find((x) => x.id.toLowerCase() === ticketId.toLowerCase());
+  const payload: AgentAssistPending = {
+    type: "human_assist",
+    ticket_id: ticketId,
+    status: "pending",
+    question: query,
+    customer_name: ticket?.cust,
+    ticket_number: ticket?.ticketNumber,
+    customer_reply: "Let me check with my team on that — I'll be right back with an answer.",
+  };
+  mockApprovals.set(ticketId, payload);
+  emitEvent("human_assist_pending", { ticket_id: ticketId, payload });
+  return payload;
+}
+
+/** Mock POST /agent/assist/:ticketId/answer — delivers a human answer to the
+ *  customer as the bot's own message and resolves the assist. */
+export async function mockAgentAssistAnswer(
+  ticketId: string,
+  text: string,
+): Promise<{ ok: boolean; reply?: string }> {
+  await withLatency(null);
+  mockApprovals.delete(ticketId);
+  const reply = text.trim();
+  emitEvent("human_assist_resolved", { ticket_id: ticketId, reply });
   const t = mockDb.tickets.find((x) => x.id.toLowerCase() === ticketId.toLowerCase());
   if (t) {
     t.msgs = [...t.msgs, { who: "ai_bot" as const, text: reply }];

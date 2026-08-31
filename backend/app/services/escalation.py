@@ -114,10 +114,25 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
     if any("HIGH" in (r.action or "").upper() for r in fired):
         ticket.priority = "high"
 
+    # Handover context for the agent-facing AI summary banner (design.md §P5.2):
+    # ticket_assist() reads ai_sentiment/ai_summary, so record why we escalated.
+    rule_names = " + ".join(r.name for r in fired)
+    last_customer_text = next(
+        (m.body for m in reversed(ticket.messages or [])
+         if m.sender_type == MessageSender.CUSTOMER),
+        None,
+    )
+    ticket.ai_sentiment = rule_names
+    ticket.ai_summary = (
+        f"Auto-routed from {ticket.channel} — “{(last_customer_text or '')[:140]}”"
+        if last_customer_text
+        else f"Auto-routed by escalation rules: {rule_names}"
+    )
+
     db.add(Message(
         ticket_id=ticket.id, sender_type=MessageSender.SYSTEM, sender_name="System",
-        body=note or "Escalated · " + " + ".join(r.name for r in fired) +
-             (f" · priority HIGH" if any("HIGH" in (r.action or "").upper() for r in fired) else ""),
+        body=note or "Escalated · " + rule_names +
+             (" · priority HIGH" if any("HIGH" in (r.action or "").upper() for r in fired) else ""),
         is_bot=False, is_read=True,
     ))
 
@@ -153,6 +168,13 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
         ))
     db.commit()
 
+    from app.services.ticket_activity import record
+    record(db, ticket.id, tenant.id, "Automation", "escalated",
+           new_value="escalated",
+           detail=f"Escalation rules fired: {', '.join(r.name for r in fired)} — assigned to "
+                  f"{ticket.assignee.full_name if ticket.assignee else 'first available agent'}")
+
+    publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
     publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
     publish_event("notification", {"ticket_id": ticket.id})
 

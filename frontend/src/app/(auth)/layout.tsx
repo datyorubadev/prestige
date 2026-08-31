@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import { redirect, usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { AppShell } from "@/components/layout/app-shell";
+import { ToastProvider } from "@/components/ui/toast";
 
 const subscribeEmpty = () => () => {};
 
@@ -48,7 +49,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       return <AppShell>{children}</AppShell>;
     }
     // Allow guest access to the customer portal & help center without staff login redirect
-    return <>{children}</>;
+    return <ToastProvider>{children}</ToastProvider>;
   }
 
   if (user) return <AppShell>{children}</AppShell>;

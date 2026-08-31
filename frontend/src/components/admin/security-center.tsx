@@ -1,6 +1,10 @@
+"use client";
+
 import { useState, useEffect } from "react";
 import { Icon } from "@/components/icons";
 import { Select, type SelectOption } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -12,48 +16,21 @@ const BROADCAST_LEVELS: SelectOption[] = [
 
 export interface ActiveSession {
   id: string;
+  userId: string;
   userName: string;
-  userEmail: string;
-  role: string;
-  ipAddress: string;
+  email: string;
+  ip: string;
   device: string;
-  lastActive: string;
+  createdAt: string;
+  lastSeen: string;
 }
-
-const MOCK_SESSIONS: ActiveSession[] = [
-  {
-    id: "sess-1",
-    userName: "Owner User",
-    userEmail: "owner@prestige.com",
-    role: "owner",
-    ipAddress: "192.168.1.132",
-    device: "Chrome / Windows 11",
-    lastActive: "Just now",
-  },
-  {
-    id: "sess-2",
-    userName: "Amaka Okafor",
-    userEmail: "agent@prestige.com",
-    role: "agent",
-    ipAddress: "102.89.22.14",
-    device: "Firefox / macOS",
-    lastActive: "4 mins ago",
-  },
-  {
-    id: "sess-3",
-    userName: "John Customer",
-    userEmail: "john@customer.com",
-    role: "customer",
-    ipAddress: "197.210.45.88",
-    device: "Safari / iOS",
-    lastActive: "18 mins ago",
-  },
-];
 
 export function SecurityCenter() {
   const toast = useToast();
-  const [sessions, setSessions] = useState<ActiveSession[]>(MOCK_SESSIONS);
-  const [revokedMsg, setRevokedMsg] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<ActiveSession | null>(null);
 
   // Broadcast state
   const [broadcastMsg, setBroadcastMsg] = useState("");
@@ -61,15 +38,19 @@ export function SecurityCenter() {
   const [activeBroadcast, setActiveBroadcast] = useState<string | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
 
+  const fetchSessions = () => {
+    api.get<ActiveSession[]>("/platform/sessions").then((data) => {
+      setSessions(data);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchSessions(); }, []);
+
   useEffect(() => {
-    api
-      .get<{ broadcast: { message: string; level: string } | null }>("/platform/broadcast")
-      .then((res) => {
-        if (res?.broadcast?.message) {
-          setActiveBroadcast(res.broadcast.message);
-        }
-      })
-      .catch(() => {});
+    api.get<{ broadcast: { message: string; level: string } | null }>("/platform/broadcast").then((res) => {
+      if (res?.broadcast?.message) setActiveBroadcast(res.broadcast.message);
+    }).catch(() => {});
   }, []);
 
   const sendBroadcast = async (e: React.FormEvent) => {
@@ -77,11 +58,7 @@ export function SecurityCenter() {
     if (!broadcastMsg.trim()) return;
     setBroadcasting(true);
     try {
-      await api.post("/platform/broadcast", {
-        message: broadcastMsg.trim(),
-        level: broadcastLevel,
-        active: true,
-      });
+      await api.post("/platform/broadcast", { message: broadcastMsg.trim(), level: broadcastLevel, active: true });
       setActiveBroadcast(broadcastMsg.trim());
       setBroadcastMsg("");
       toast("Broadcast alert published to all active tenants in realtime");
@@ -95,10 +72,7 @@ export function SecurityCenter() {
   const clearBroadcast = async () => {
     setBroadcasting(true);
     try {
-      await api.post("/platform/broadcast", {
-        message: "",
-        active: false,
-      });
+      await api.post("/platform/broadcast", { message: "", active: false });
       setActiveBroadcast(null);
       toast("Active platform broadcast cleared");
     } catch {
@@ -108,10 +82,27 @@ export function SecurityCenter() {
     }
   };
 
-  const revokeSession = (id: string, userEmail: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-    setRevokedMsg(`Revoked session for ${userEmail}. Forced logout issued.`);
-    setTimeout(() => setRevokedMsg(null), 3000);
+  const doRevoke = async (session: ActiveSession) => {
+    setRevokingId(session.id);
+    try {
+      await api.delete(`/platform/sessions/${session.id}`);
+      setSessions((prev) => prev.filter((s) => s.id !== session.id));
+      toast(`Revoked session for ${session.email}`);
+    } catch {
+      toast("Could not revoke session", "danger");
+    } finally {
+      setRevokingId(null);
+      setConfirmRevoke(null);
+    }
+  };
+
+  const timeAgo = (iso: string) => {
+    if (!iso) return "—";
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 60000) return "just now";
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return `${Math.floor(diff / 86400000)}d ago`;
   };
 
   return (
@@ -123,7 +114,7 @@ export function SecurityCenter() {
         </p>
       </header>
 
-      {/* Emergency Broadcast Control Card */}
+      {/* Emergency Broadcast */}
       <div className="rounded-xl border border-border bg-surface p-5 shadow-xs">
         <div className="flex items-center justify-between gap-3 mb-3">
           <div className="flex items-center gap-2">
@@ -148,7 +139,7 @@ export function SecurityCenter() {
             </div>
             <button
               type="button"
-              onClick={clearBroadcast}
+              onClick={() => void clearBroadcast()}
               disabled={broadcasting}
               className="shrink-0 rounded bg-white px-2.5 py-1 text-[11.5px] font-bold text-danger border border-danger/30 hover:bg-danger-soft transition-colors"
             >
@@ -157,12 +148,12 @@ export function SecurityCenter() {
           </div>
         )}
 
-        <form onSubmit={sendBroadcast} className="flex flex-col gap-3">
+        <form onSubmit={(e) => void sendBroadcast(e)} className="flex flex-col gap-3">
           <div className="flex flex-col sm:flex-row gap-3">
             <input
               value={broadcastMsg}
               onChange={(e) => setBroadcastMsg(e.target.value)}
-              placeholder="e.g. Scheduled platform maintenance in 30 minutes. Chat will remain active."
+              placeholder="e.g. Scheduled platform maintenance in 30 minutes."
               className="input-control flex-1"
             />
             <Select
@@ -184,54 +175,66 @@ export function SecurityCenter() {
         </form>
       </div>
 
-      {revokedMsg && (
-        <div className="flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-[13px] text-red-600 font-medium animate-in fade-in">
-          <Icon name="shield" size={16} />
-          {revokedMsg}
-        </div>
-      )}
-
+      {/* Sessions */}
       <div className="rounded-lg border border-border bg-surface p-4">
         <h3 className="text-micro font-bold uppercase tracking-wider text-text-3 mb-3">
           Active Authenticated Sessions ({sessions.length})
         </h3>
 
-        <div className="flex flex-col gap-2">
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-surface-2 p-3 text-[12.5px]"
-            >
-              <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 font-bold text-primary">
-                  {s.userName[0]}
+        {loading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : sessions.length === 0 ? (
+          <p className="py-8 text-center text-[13px] text-text-3">No active sessions found.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {sessions.map((s) => (
+              <div
+                key={s.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-surface-2 p-3 text-[12.5px]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 font-bold text-primary">
+                    {(s.userName ?? s.email ?? "?")[0].toUpperCase()}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-text">{s.userName || s.email}</p>
+                    <p className="text-[11.5px] text-text-3">{s.email}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="font-semibold text-text">{s.userName}</p>
-                  <p className="text-[11.5px] text-text-3">{s.userEmail} • <span className="font-mono">{s.role}</span></p>
+
+                <div className="flex items-center gap-4">
+                  <div className="text-right text-[11.5px] text-text-3 font-mono">
+                    <p>{s.ip || "—"}</p>
+                    <p className="text-[10.5px] text-text-3">{s.device || "—"}</p>
+                  </div>
+
+                  <span className="text-text-3 text-[11.5px]">{timeAgo(s.lastSeen)}</span>
+
+                  <button
+                    type="button"
+                    disabled={revokingId === s.id}
+                    onClick={() => setConfirmRevoke(s)}
+                    className="rounded bg-red-500/10 px-2.5 py-1 text-[11.5px] font-semibold text-red-600 hover:bg-red-500/20 disabled:opacity-50"
+                  >
+                    {revokingId === s.id ? "Revoking…" : "Force Logout"}
+                  </button>
                 </div>
               </div>
-
-              <div className="flex items-center gap-4">
-                <div className="text-right text-[11.5px] text-text-3 font-mono">
-                  <p>{s.ipAddress}</p>
-                  <p className="text-[10.5px] text-text-3">{s.device}</p>
-                </div>
-
-                <span className="text-text-3 text-[11.5px]">{s.lastActive}</span>
-
-                <button
-                  type="button"
-                  onClick={() => revokeSession(s.id, s.userEmail)}
-                  className="rounded bg-red-500/10 px-2.5 py-1 text-[11.5px] font-semibold text-red-600 hover:bg-red-500/20"
-                >
-                  Force Logout
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      <ConfirmModal
+        open={!!confirmRevoke}
+        onClose={() => setConfirmRevoke(null)}
+        title="Force Logout?"
+        description={`This will immediately revoke the active session for ${confirmRevoke?.email ?? ""}. They will need to sign in again.`}
+        confirmLabel="Revoke Session"
+        tone="danger"
+        busy={revokingId === confirmRevoke?.id}
+        onConfirm={() => { if (confirmRevoke) void doRevoke(confirmRevoke); }}
+      />
     </div>
   );
 }

@@ -10,7 +10,7 @@ Every provider webhook (and the simulator) funnels through `ingest_message`:
 
 import json
 import logging
-
+import threading
 from sqlalchemy.orm import Session
 
 from app.models import ChannelSetting, Customer, Message, Tenant, Ticket
@@ -80,15 +80,17 @@ def ingest_message(db: Session, channel: ChannelSetting, msg: InboundMessage,
         db.flush()
         publish_event("ticket_created", {"ticket_id": ticket.id, "channel": msg.channel})
 
-    db.add(Message(
+    cust_msg = Message(
         ticket_id=ticket.id, sender_type=MessageSender.CUSTOMER,
         sender_name=customer.full_name or "Customer",
         body=msg.text, is_bot=False, is_read=True,
         external_id=msg.external_message_id,
-    ))
+    )
+    db.add(cust_msg)
     ticket.unread = True
     db.flush()
-    publish_event("message_created", {"ticket_id": ticket.id, "who": "customer", "text": msg.text, "channel": msg.channel})
+    db.refresh(cust_msg)
+    publish_event("message_created", {"ticket_id": ticket.id, "message_id": cust_msg.id, "who": "customer", "text": msg.text, "channel": msg.channel})
 
     fired = escalation.evaluate(db, tenant, ticket, msg.text)
     if fired:
@@ -99,28 +101,17 @@ def ingest_message(db: Session, channel: ChannelSetting, msg: InboundMessage,
     db.refresh(ticket)
 
     replied = False
-    reply = ""
     config = json.loads(channel.provider_config or "{}")
     should_reply = auto_reply if auto_reply is not None else auto_reply_enabled(config)
-    if should_reply and not fired:
-        try:
-            result = agent.invoke_agent(tenant.id, ticket.id, msg.text)
-            reply = str(result.get("reply") or "").strip()
-            if reply and not result.get("interrupts"):
-                db.add(Message(
-                    ticket_id=ticket.id, sender_type=MessageSender.AI_BOT,
-                    sender_name=tenant.bot_name or "AI Assistant",
-                    body=reply, is_bot=True, is_read=False,
-                ))
-                ticket.unread = True
-                db.commit()
-                publish_event("message_created", {"ticket_id": ticket.id, "who": "ai", "text": reply, "channel": msg.channel})
-                publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
-                dispatch_outbound(db, ticket, reply, "ai")
-                replied = True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("channel auto-reply failed: %s", exc)
-            db.rollback()
+    if should_reply and not fired and not getattr(ticket, "ai_paused", False):
+        # Burst buffering: hold the reply until a quiet window passes, then
+        # answer the merged burst ONCE via a background timer.
+        from app.config import settings as _settings
+        from app.services.chat_buffer import chat_buffer
+
+        chat_buffer.add(ticket.id, msg.text)
+        _schedule_channel_flush(tenant.id, ticket.id, msg.channel,
+                                max(1, int(getattr(_settings, "ai_buffer_seconds", 5))))
 
     db.refresh(ticket)
     publish_event("channel_message", {
@@ -133,3 +124,65 @@ def ingest_message(db: Session, channel: ChannelSetting, msg: InboundMessage,
         "fired": [rule_dto(r) for r in fired],
         "replied": replied,
     }
+
+
+# One pending flush per ticket — later messages just re-arm the timer.
+_flush_timers: dict[str, threading.Timer] = {}
+_flush_lock = threading.Lock()
+
+
+def _schedule_channel_flush(tenant_id: str, ticket_id: str, channel_name: str, seconds: int) -> None:
+    def _flush():
+        with _flush_lock:
+            _flush_timers.pop(ticket_id, None)
+        try:
+            _flush_channel_reply(tenant_id, ticket_id, channel_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("buffered channel reply failed: %s", exc)
+
+    with _flush_lock:
+        old = _flush_timers.get(ticket_id)
+        if old is not None:
+            old.cancel()
+        t = threading.Timer(seconds, _flush)
+        t.daemon = True
+        _flush_timers[ticket_id] = t
+        t.start()
+
+
+def _flush_channel_reply(tenant_id: str, ticket_id: str, channel_name: str) -> None:
+    """Generate and send ONE merged AI reply for a buffered customer burst."""
+    from app.database import SessionLocal
+    from app.services.chat_buffer import chat_buffer
+
+    texts = chat_buffer.drain(ticket_id)
+    if not texts:
+        return
+    merged = "\n".join(dict.fromkeys(texts))  # unique, order-preserving
+
+    db = SessionLocal()
+    try:
+        tenant = db.get(Tenant, tenant_id)
+        ticket = db.get(Ticket, ticket_id)
+        if not tenant or not ticket or getattr(ticket, "ai_paused", False):
+            return
+        if ticket.status in ("resolved", "closed"):
+            return
+        publish_event("ai_typing", {"ticket_id": ticket.id})
+        result = agent.invoke_agent(tenant.id, ticket.id, merged)
+        reply = str(result.get("reply") or "").strip()
+        if reply and not result.get("interrupts") and not result.get("blocked"):
+            ai_msg = Message(
+                ticket_id=ticket.id, sender_type=MessageSender.AI_BOT,
+                sender_name=tenant.bot_name or "AI Assistant",
+                body=reply, is_bot=True, is_read=False,
+            )
+            db.add(ai_msg)
+            ticket.unread = True
+            db.commit()
+            db.refresh(ai_msg)
+            publish_event("message_created", {"ticket_id": ticket.id, "message_id": ai_msg.id, "who": "ai", "text": reply, "channel": channel_name})
+            publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+            dispatch_outbound(db, ticket, reply, "ai")
+    finally:
+        db.close()

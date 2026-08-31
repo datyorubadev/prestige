@@ -268,7 +268,7 @@ function RecentTicketsTable({ tickets }: { tickets: Ticket[] }) {
           const t = row.original;
           return (
             <Link
-              href={`/dashboard/tickets?email=${encodeURIComponent(t.email)}`}
+              href={`/dashboard/tickets/${ticketNumberFor(t)}`}
               className={`font-mono text-code ${t.unread ? "font-bold text-text" : ""} hover:text-primary`}
             >
               {ticketNumberFor(t)}
@@ -285,7 +285,7 @@ function RecentTicketsTable({ tickets }: { tickets: Ticket[] }) {
             <CellMain
               main={
                 <Link
-                  href={`/dashboard/tickets?email=${encodeURIComponent(t.email)}`}
+                  href={`/dashboard/tickets/${ticketNumberFor(t)}`}
                   className="font-semibold hover:text-primary"
                 >
                   {t.subject}

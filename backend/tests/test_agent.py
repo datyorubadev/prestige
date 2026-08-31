@@ -3,8 +3,9 @@ handoff, and the no-GROQ-key fallback. The checkpointer is forced to memory in
 conftest so no Redis is required."""
 
 import asyncio
+from unittest.mock import patch
 
-from app.models import Customer, Message, Tenant, Ticket
+from app.models import Customer, Message, Tenant, Ticket, User
 from app.models.common import TicketStatus
 from app.services import agent, chat_service
 from app.services.mock_tools import ALL_TOOLS, ALL_TOOLS_BY_NAME, heuristic_tool_results
@@ -111,6 +112,68 @@ def test_pending_and_resume_helpers(db_session):
 
     asyncio.run(agent.resume_agent(ticket_id, {"approved": True}))
     assert asyncio.run(agent.pending_approval(ticket_id)) is None
+
+
+def _set_agent_online(db, tenant_id):
+    a = db.query(User).filter(User.tenant_id == tenant_id, User.role != "customer").first()
+    a.presence_status = "online"
+    a.last_seen = __import__("datetime").datetime.utcnow()
+    db.commit()
+    return a
+
+
+def test_human_assist_interrupts_and_answer_flow(db_session):
+    tenant_id, ticket_id = _new_ticket(db_session)
+    _set_agent_online(db_session, tenant_id)
+
+    # Force empty RAG context so routing hits the assist path.
+    with patch("app.services.agent.rag_context", return_value=""):
+        result = agent.invoke_agent(tenant_id, ticket_id, "what is your return policy for shipments to Lagos?")
+    assert result.get("__interrupt__"), "out-of-KB question should pause for human assist"
+    payload = agent._first_interrupt_payload(result["__interrupt__"])
+    assert payload["type"] == "human_assist"
+    assert payload["customer_reply"]
+
+    # Customer hears the holding reply, not a hard escalation yet.
+    assert db_session.get(Ticket, ticket_id).status != TicketStatus.ESCALATED
+
+    # Agent answers → delivered back to the customer as the bot's own message.
+    resumed = asyncio.run(agent.resume_agent(ticket_id, {"answer": "Returns are accepted within 30 days."}))
+    assert resumed["ok"]
+    assert asyncio.run(agent.pending_approval(ticket_id)) is None
+    msgs = _ticket_messages(db_session, ticket_id)
+    assert any("Returns are accepted within 30 days" in m.body and m.is_bot for m in msgs)
+
+
+def test_human_assist_escalates_when_no_agent_online(db_session):
+    tenant_id, ticket_id = _new_ticket(db_session)
+    # Ensure no agent is online → soft assist falls back to a hard escalation.
+    for u in db_session.query(User).filter(User.tenant_id == tenant_id, User.role != "customer").all():
+        u.presence_status = "offline"
+        u.last_seen = None
+    db_session.commit()
+    with patch("app.services.agent.rag_context", return_value=""):
+        result = agent.invoke_agent(tenant_id, ticket_id, "what is your policy on express delivery to Abuja?")
+    assert not result.get("__interrupt__")
+    assert db_session.get(Ticket, ticket_id).status == TicketStatus.ESCALATED
+
+
+def test_stream_emits_human_assist_pending_event(db_session):
+    tenant_id, ticket_id = _new_ticket(db_session)
+    _set_agent_online(db_session, tenant_id)
+
+    async def _collect():
+        frames = []
+        with patch("app.services.agent.rag_context", return_value=""):
+            async for f in agent.stream_agent(tenant_id, ticket_id, "what happens if I miss my delivery window?"):
+                frames.append(f)
+        return frames
+
+    frames = asyncio.run(_collect())
+    assert any(f.get("human_assist_pending") for f in frames)
+    # Holding reply streamed to the customer.
+    text = "".join(f.get("token", "") for f in frames)
+    assert "check with my team" in text
 
 
 def test_stream_holds_while_approval_pending(db_session):

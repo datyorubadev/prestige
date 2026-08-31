@@ -59,6 +59,9 @@ export function Subscriptions() {
   const paidCount = (tenants ?? []).filter(
     (t) => t.status === "active" && t.plan !== "starter",
   ).length;
+  const trialCount = (tenants ?? []).filter((t) => t.status === "pending").length;
+  const totalTrials = trialCount + paidCount;
+  const conversionRate = totalTrials > 0 ? Math.round((paidCount / totalTrials) * 100) : 0;
 
   const planIndex = useCallback((code: PlanCode) => PLAN_ORDER.indexOf(code), []);
   const subStatus = useCallback(
@@ -177,8 +180,8 @@ export function Subscriptions() {
       </header>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-4">
-        <Kpi label="MRR (mock)" value={mrr ? formatNgn(mrr) : "—"} note={`${paidCount} paid tenants`} icon="card" />
-        <Kpi label="Trial → paid" value="38%" note="past 30d · mock" icon="trend" good />
+        <Kpi label="MRR" value={mrr ? formatNgn(mrr) : "—"} note={`${paidCount} paid tenants`} icon="card" />
+        <Kpi label="Trial → paid" value={`${conversionRate}%`} note={`${trialCount} trials · ${paidCount} paid`} icon="trend" good />
         <Kpi label="Avg. per tenant" value={paidCount ? formatNgn(Math.round(mrr / paidCount)) : "—"} note="paid plans only" icon="users" />
       </div>
 

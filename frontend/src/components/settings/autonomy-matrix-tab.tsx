@@ -1,10 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { useToast } from "@/components/ui/toast";
 import { Icon, type IconName } from "@/components/icons";
 import { Select, type SelectOption } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Spinner } from "@/components/ui/spinner";
 
 export interface ToolAutonomyRule {
   id: string;
@@ -15,64 +18,13 @@ export interface ToolAutonomyRule {
   minConfidence: number;
 }
 
-const INITIAL_TOOLS: ToolAutonomyRule[] = [
-  {
-    id: "t1",
-    toolName: "search_knowledge",
-    description: "Search Knowledge Base articles, FAQs, and uploaded documents to answer customer questions",
-    category: "customer",
-    autonomyLevel: "autonomous",
-    minConfidence: 70,
-  },
-  {
-    id: "t2",
-    toolName: "get_customer_history",
-    description: "Retrieve past ticket history, sentiment trends, and customer profile metadata",
-    category: "customer",
-    autonomyLevel: "autonomous",
-    minConfidence: 65,
-  },
-  {
-    id: "t3",
-    toolName: "create_ticket",
-    description: "Automatically open and categorize new support tickets based on customer inquiries",
-    category: "tickets",
-    autonomyLevel: "autonomous",
-    minConfidence: 75,
-  },
-  {
-    id: "t4",
-    toolName: "update_customer_information",
-    description: "Update customer phone numbers, shipping addresses, or profile notes",
-    category: "customer",
-    autonomyLevel: "requires_approval",
-    minConfidence: 85,
-  },
-  {
-    id: "t5",
-    toolName: "cancel_order",
-    description: "Cancel active e-commerce orders and initiate automatic returns or refunds",
-    category: "orders",
-    autonomyLevel: "requires_approval",
-    minConfidence: 90,
-  },
-  {
-    id: "t6",
-    toolName: "send_email",
-    description: "Dispatch outbound email notifications or customer verification emails",
-    category: "communication",
-    autonomyLevel: "requires_approval",
-    minConfidence: 80,
-  },
-  {
-    id: "t7",
-    toolName: "assign_ticket",
-    description: "Route and re-assign incoming conversations to specific agent teams",
-    category: "tickets",
-    autonomyLevel: "autonomous",
-    minConfidence: 75,
-  },
-];
+const CATEGORY_MAP: Record<string, ToolAutonomyRule["category"]> = {
+  api: "customer",
+  kyc: "customer",
+  doc_verify: "orders",
+  callback: "tickets",
+  custom: "communication",
+};
 
 const AUTONOMY_OPTIONS: SelectOption[] = [
   { value: "autonomous", label: "Fully Autonomous", icon: "check", iconColor: "text-primary" },
@@ -82,10 +34,36 @@ const AUTONOMY_OPTIONS: SelectOption[] = [
 
 export function AutonomyMatrixTab() {
   const router = useRouter();
-  const [tools, setTools] = useState<ToolAutonomyRule[]>(INITIAL_TOOLS);
+  const toast = useToast();
+  const [tools, setTools] = useState<ToolAutonomyRule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .get<{ tools: any[] }>("/ai/tools")
+      .then((res) => {
+        if (!active) return;
+        const mapped: ToolAutonomyRule[] = (res.tools ?? []).map((t: any) => ({
+          id: t.id,
+          toolName: t.name,
+          description: t.description || "",
+          category: CATEGORY_MAP[t.category] ?? "customer",
+          autonomyLevel: t.requiresApproval ? "requires_approval" : t.isActive ? "autonomous" : "disabled",
+          minConfidence: 75,
+        }));
+        setTools(mapped);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   const filteredTools = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -108,9 +86,24 @@ export function AutonomyMatrixTab() {
     );
   };
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await Promise.all(
+        tools.map((t) =>
+          api.put(`/ai/tools/${t.id}`, {
+            requiresApproval: t.autonomyLevel === "requires_approval",
+            isActive: t.autonomyLevel !== "disabled",
+          })
+        )
+      );
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch {
+      toast("Could not save autonomy settings", "danger");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -122,6 +115,13 @@ export function AutonomyMatrixTab() {
         </div>
       )}
 
+      {loading ? (
+        <div className="flex flex-col items-center justify-center gap-3 py-16 text-text-2">
+          <Spinner size={20} />
+          <p className="text-[12.5px]">Loading AI tools…</p>
+        </div>
+      ) : (
+        <>
       {/* Linear-style Filter & Search Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
         {/* Category Filters */}
@@ -163,11 +163,7 @@ export function AutonomyMatrixTab() {
           <button
             type="button"
             onClick={() => {
-              if (typeof window !== "undefined" && window.location.pathname.includes("settings")) {
-                router.push("/settings?tab=tools&builder=1");
-              } else {
-                router.push("/tools?builder=1");
-              }
+              router.push("/dashboard/tools?builder=1");
             }}
             title="Open the Visual Action Builder to create a new AI action or tool"
             className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-primary bg-primary px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-primary-dark cursor-pointer shadow-xs"
@@ -206,11 +202,7 @@ export function AutonomyMatrixTab() {
                   <button
                     type="button"
                     onClick={() => {
-                      if (typeof window !== "undefined" && window.location.pathname.includes("settings")) {
-                        router.push("/settings?tab=tools&builder=1");
-                      } else {
-                        router.push("/tools?builder=1");
-                      }
+                      router.push("/dashboard/tools?builder=1");
                     }}
                     className="inline-flex items-center gap-1.5 rounded-sm bg-primary px-3.5 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-primary-dark shadow-xs"
                   >
@@ -305,12 +297,16 @@ export function AutonomyMatrixTab() {
       <div className="flex justify-end pt-2">
         <button
           type="button"
-          onClick={handleSave}
-          className="rounded-md bg-primary px-4 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-primary-dark"
+          onClick={() => void handleSave()}
+          disabled={saving || loading}
+          className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-primary-dark disabled:opacity-50"
         >
+          {saving ? <Spinner size={14} /> : <Icon name="check" size={14} />}
           Save Autonomy Settings
         </button>
       </div>
+        </>
+      )}
     </div>
   );
 }

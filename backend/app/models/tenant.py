@@ -20,6 +20,8 @@ class Tenant(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     city: Mapped[str] = mapped_column(String(120), default="Lagos")
+    # IANA timezone — every user-facing timestamp renders in this zone.
+    timezone: Mapped[str] = mapped_column(String(64), default="Africa/Lagos")
 
     status: Mapped[TenantStatus] = mapped_column(String(20), default=TenantStatus.PENDING)
     plan_code: Mapped[str] = mapped_column(String(20), default="starter")

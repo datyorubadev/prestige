@@ -8,6 +8,8 @@ import { Card } from "@/components/ui/card";
 import { DataTable, CellMain } from "@/components/ui/data-table";
 import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/components/icons";
+import { TwoFactorSetup } from "@/components/settings/two-factor-setup";
+import { SsoConfig } from "@/components/settings/sso-config";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { AuditLog } from "@/lib/types";
 
@@ -26,12 +28,16 @@ export function AdminSecurityTab() {
 
   useRealtime({ settings_changed: () => load() });
 
-  const invalidate = () => {
+  const invalidate = async () => {
     setSessions(true);
-    setTimeout(() => {
+    try {
+      const res = await api.post<{ revokedCount: number }>("/auth/sessions/invalidate-all");
+      toast(`All admin sessions invalidated — ${res?.revokedCount ?? 0} tokens revoked & audited`);
+    } catch {
+      toast("Could not invalidate sessions", "danger");
+    } finally {
       setSessions(false);
-      toast("All admin sessions invalidated — tokens revoked & audited");
-    }, 350);
+    }
   };
 
   return (
@@ -96,6 +102,16 @@ export function AdminSecurityTab() {
         Full event stream (all tenants) is available in the Audit log. Session invalidation is
         irreversible and recorded as a critical platform event.
       </p>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card title="Two-Factor Authentication" icon="shield">
+          <TwoFactorSetup />
+        </Card>
+
+        <Card title="Single Sign-On (SSO)" icon="shield">
+          <SsoConfig />
+        </Card>
+      </div>
     </div>
   );
 }

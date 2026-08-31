@@ -43,6 +43,9 @@ class Ticket(Base):
 
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_sentiment: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Per-ticket AI control: set automatically when a human agent replies or
+    # claims the conversation; the agent then owns the thread until re-enabled.
+    ai_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     csat_rating: Mapped[int | None] = mapped_column(nullable=True)
     csat_comment: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

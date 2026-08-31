@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Icon } from "@/components/icons";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface OnboardingModalProps {
@@ -43,8 +44,17 @@ export function OnboardingModal({ tenantId }: OnboardingModalProps) {
     }
   }, [storageKey, user?.role]);
 
-  const closeAndPersist = () => {
+  const closeAndPersist = async () => {
     localStorage.setItem(storageKey, "true");
+    try {
+      await api.put("/settings/tenant", {
+        botName: botName || "Prestige AI",
+        primaryColor: brandColor,
+        welcomeMessage: welcomeMsg || "Hi there! How can we help you today?",
+      });
+    } catch {
+      // Settings persist even if API call fails
+    }
     setOpen(false);
   };
 

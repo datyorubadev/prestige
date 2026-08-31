@@ -71,7 +71,7 @@ export default function PortalProfilePage() {
     }
     setChangingPass(true);
     try {
-      await api.post("/profile", { password: newPassword });
+      await api.post("/portal/profile/password", { password: newPassword });
       toast("Password changed successfully");
       setPassModal(false);
       setNewPassword("");
@@ -86,7 +86,7 @@ export default function PortalProfilePage() {
   const requestDeletion = async () => {
     setRequestingDelete(true);
     try {
-      await api.post("/auth/request-deletion", { reason: "User requested from portal" });
+      await api.post("/portal/request-deletion", { reason: "User requested from portal" });
       toast("Account deletion request submitted");
       setDeleting(false);
     } catch {

@@ -5,6 +5,7 @@ import { API_BASE, USE_MOCK } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth-store";
 import {
   mockAgentAssistApprove,
+  mockAgentAssistAnswer,
   mockAgentAssistPending,
   streamAgentAssist,
   type AgentAssistPending,
@@ -145,5 +146,31 @@ export function useAgentAssist() {
     [],
   );
 
-  return { send, cancel, active, error, fetchPending, approve };
+  /** Agent answers a KB-gap question (soft human assist). The reply is
+   *  delivered to the customer as the bot's own message. */
+  const answer = useCallback(
+    async (ticketId: string, text: string): Promise<ApproveResponse> => {
+      if (USE_MOCK) return mockAgentAssistAnswer(ticketId, text);
+      const res = await fetch(`${API_BASE}/agent/assist/${ticketId}/answer`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+        },
+        body: JSON.stringify({ answer: text }),
+      });
+      if (!res.ok) {
+        const env = (await res.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        throw new Error(env?.error?.message ?? "Could not send the answer");
+      }
+      const body = (await res.json()) as ApproveResponse;
+      if (body.ok === false) throw new Error(body.error ?? "Could not send the answer");
+      return body;
+    },
+    [],
+  );
+
+  return { send, cancel, active, error, fetchPending, approve, answer };
 }

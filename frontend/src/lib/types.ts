@@ -18,7 +18,7 @@ export type TicketType = "complaint" | "request" | "inquiry" | "unclassified";
 
 export type TicketChannel = "chat" | "whatsapp" | "portal" | "email" | "telegram" | "sms";
 
-export type MessageSender = "customer" | "ai_bot" | "human_agent" | "system" | "agent";
+export type MessageSender = "customer" | "ai_bot" | "ai" | "human_agent" | "system" | "agent";
 
 export type KnowledgeType = "pdf" | "link" | "raw_text";
 
@@ -107,6 +107,8 @@ export interface Tenant {
   color: string;
   tone: string;
   city: string;
+  /** Tenant IANA timezone — timestamps across app/exports render in this zone. */
+  timezone?: string;
   /* §4.4/§4.5 Brand & widget settings (owner-managed, tenant-scoped). */
   /** Widget/brand logo — data URL (mock) or server-served upload URL. */
   logoUrl?: string | null;
@@ -237,6 +239,8 @@ export interface Ticket {
   snoozedUntil?: string;
   /** If this ticket was merged, the ID of the primary ticket it was merged into. */
   mergedIntoId?: string;
+  /** True when a human has taken over — the AI stays quiet until re-enabled. */
+  aiPaused?: boolean;
 }
 
 export interface TicketEvent {
@@ -399,6 +403,8 @@ export interface ChatStreamFrame {
   response_by?: "ai" | "human" | "system_alert";
   error?: { code?: string; message?: string } | string;
   needs_approval?: boolean;
+  /** Human owns this conversation — the AI stays quiet (handoff mode). */
+  ai_paused?: boolean;
   approval_payload?: {
     type?: string;
     ticket_id?: string;
@@ -407,12 +413,41 @@ export interface ChatStreamFrame {
     status?: string;
     customer_reply?: string;
   } | null;
+  /** Soft human-assist (KB gap): a human answer is being awaited on this
+   *  ticket. Includes the customer's question the agent must answer. */
+  human_assist_pending?: boolean;
+  assist_payload?: HumanAssistPending | null;
+}
+
+/** A KB-gap question routed to available agents for a human answer. */
+export interface HumanAssistPending {
+  type: "human_assist";
+  ticket_id?: string;
+  tenant_id?: string;
+  customer_reply?: string;
+  question?: string;
+  customer_email?: string;
+  customer_name?: string;
+  ticket_number?: string;
+  bot_name?: string;
+  status?: string;
+  created_at?: string;
 }
 
 export interface EventBusEnvelope<T = Record<string, unknown>> {
   type:
     | "ticket_created"
     | "ticket_updated"
+    | "ticket_escalated"
+    | "ticket_assigned"
+    | "ticket_deleted"
+    | "message_created"
+    | "message_updated"
+    | "message_deleted"
+    | "agent_approval_pending"
+    | "agent_approval_resolved"
+    | "human_assist_pending"
+    | "human_assist_resolved"
     | "settings_changed"
     | "escalation_rules_changed"
     | "notification"
@@ -433,6 +468,8 @@ export interface SessionUser {
   tenantId: string | null;
   initials: string;
   color: string;
+  /** Tenant IANA timezone — all timestamps render in this zone. */
+  timezone?: string;
 }
 
 export interface DemoUser extends SessionUser {

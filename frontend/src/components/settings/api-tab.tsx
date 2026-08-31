@@ -124,7 +124,21 @@ export function ApiTab() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => toast("Export started — knowledge.json is being prepared")}
+              onClick={async () => {
+                try {
+                  const data = await api.get<any>("/kb/export");
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "knowledge-export.json";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  toast("Knowledge base exported successfully");
+                } catch {
+                  toast("Could not export knowledge base", "danger");
+                }
+              }}
               className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text"
             >
               <Icon name="file" size={13} />
@@ -132,7 +146,25 @@ export function ApiTab() {
             </button>
             <button
               type="button"
-              onClick={() => toast("Import from a Zendesk export JSON")}
+              onClick={() => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = ".json";
+                input.onchange = async (e) => {
+                  const file = (e.target as HTMLInputElement).files?.[0];
+                  if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+                    const articles = data.articles || [];
+                    const res = await api.post<any>("/kb/import", { articles });
+                    toast(`Imported ${res?.imported ?? 0} articles (${res?.skipped ?? 0} skipped)`);
+                  } catch {
+                    toast("Could not import — check the file format", "danger");
+                  }
+                };
+                input.click();
+              }}
               className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text"
             >
               <Icon name="swap" size={13} />

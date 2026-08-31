@@ -3,11 +3,14 @@
 import { useCallback, useRef, useState } from "react";
 import { API_BASE, USE_MOCK } from "@/lib/api";
 import { streamWidgetReply, widgetApprovalFor } from "@/lib/mock";
-import type { ChatStreamFrame } from "@/lib/types";
+import { humanAssistFor } from "@/lib/mock";
+import type { ChatStreamFrame, HumanAssistPending } from "@/lib/types";
 
 export interface StreamingChatArgs {
   ticketId: string;
   query: string;
+  /** Widget session id issued by /widget/send — required by the /chat gate. */
+  sessionId?: string;
   /** Brand tone for the mock reply engine (professional/casual/pidgin/formal). */
   tone?: string;
   onToken: (token: string) => void;
@@ -47,9 +50,14 @@ export function useStreamingChat() {
         // Mirror the backend interrupt: refund intents register an approval so
         // the widget shows its pending state and staff can act on it live.
         const approval = widgetApprovalFor(args.ticketId, args.query);
+        // Mirror the backend soft handoff: questions the KB can't answer route
+        // to an available human agent for a typed answer.
+        const assist = !approval ? humanAssistFor(args.ticketId, args.query) : null;
         const frame: ChatStreamFrame = approval
           ? { done: true, response_by: "ai", needs_approval: true, approval_payload: approval }
-          : { done: true, response_by: "ai" };
+          : assist
+            ? { done: true, response_by: "ai", human_assist_pending: true, assist_payload: assist as unknown as HumanAssistPending }
+            : { done: true, response_by: "ai" };
         args.onDone?.(frame);
         return frame;
       }
@@ -59,7 +67,7 @@ export function useStreamingChat() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ctrlRef.current.signal,
-        body: JSON.stringify({ ticket_id: args.ticketId, query: args.query }),
+        body: JSON.stringify({ ticket_id: args.ticketId, query: args.query, sessionId: args.sessionId }),
       });
       if (!res.ok || !res.body) {
         const env = (await res.json().catch(() => null)) as {

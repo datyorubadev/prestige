@@ -94,6 +94,20 @@ export function AgentsManager() {
     }
   };
 
+  const revoke = async (a: AgentUser) => {
+    setBusy(true);
+    try {
+      await api.post<AgentUser>(`/agents/${a.id}/revoke-invite`);
+      setAgents((prev) => (prev ?? []).filter((x) => x.id !== a.id));
+      setManaging(null);
+      toast(`Invitation to ${a.email} revoked`);
+    } catch {
+      toast("Could not revoke invitation", "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const setActive = async (a: AgentUser, active: boolean) => {
     setBusy(true);
     try {
@@ -226,6 +240,7 @@ export function AgentsManager() {
             agents={filteredAgents}
             busy={busy}
             onResend={(a) => void resend(a)}
+            onRevoke={(a) => void revoke(a)}
             onManage={setManaging}
           />
         )}
@@ -374,15 +389,25 @@ export function AgentsManager() {
               </div>
             </div>
             {managing.invitePending && (
-              <button
-                type="button"
-                onClick={() => void resend(managing)}
-                disabled={busy}
-                className="inline-flex w-fit items-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {busy ? <Spinner size={13} /> : <Icon name="clock" size={13} />}
-                Re-send invite
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void resend(managing)}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {busy ? <Spinner size={13} /> : <Icon name="clock" size={13} />}
+                  Re-send invite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void revoke(managing)}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1.5 rounded-sm border border-danger/30 bg-surface px-3 py-1.5 text-[12px] font-semibold text-danger transition-colors duration-150 hover:bg-danger/5 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Revoke invite
+                </button>
+              </div>
             )}
             <p className="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[11.5px] text-text-3">
               Presence & workload are shared live with the whole team.
@@ -398,11 +423,13 @@ function AgentsTable({
   agents,
   busy,
   onResend,
+  onRevoke,
   onManage,
 }: {
   agents: AgentUser[];
   busy: boolean;
   onResend: (a: AgentUser) => void;
+  onRevoke: (a: AgentUser) => void;
   onManage: (a: AgentUser) => void;
 }) {
   const columns = useMemo<ColumnDef<AgentUser, unknown>[]>(
@@ -481,15 +508,25 @@ function AgentsTable({
             <div className="text-right">
               <span className="flex items-center justify-end gap-1.5">
                 {a.invitePending && (
-                  <button
-                    type="button"
-                    onClick={() => onResend(a)}
-                    disabled={busy}
-                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-surface px-2.5 py-1.5 text-[11.5px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Icon name="clock" size={13} />
-                    Resend
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onResend(a)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1 rounded-sm border border-border bg-surface px-2.5 py-1.5 text-[11.5px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Icon name="clock" size={13} />
+                      Resend
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRevoke(a)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1 rounded-sm border border-danger/30 bg-surface px-2.5 py-1.5 text-[11.5px] font-semibold text-danger transition-colors duration-150 hover:bg-danger/5 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Revoke
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -504,7 +541,7 @@ function AgentsTable({
         },
       },
     ],
-    [busy, onResend, onManage],
+    [busy, onResend, onRevoke, onManage],
   );
   return <DataTable columns={columns} data={agents} getRowId={(a) => a.id} hoverable />;
 }

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useRealtime } from "@/lib/realtime";
 import { Icon } from "@/components/icons";
 import { EmptyState } from "@/components/ui/empty-state";
 import { datasetIcon } from "@/lib/icons-map";
@@ -31,6 +32,14 @@ export function NotificationsBell() {
       active = false;
     };
   }, []);
+
+  useRealtime({
+    notification: () => {
+      void api.get<NotificationItem[]>("/notifications").then((n) => {
+        setItems(n ?? []);
+      }).catch(() => {});
+    },
+  });
 
   useEffect(() => {
     if (!open) return;

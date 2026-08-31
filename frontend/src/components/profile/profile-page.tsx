@@ -7,6 +7,7 @@ import { setSessionUser } from "@/lib/auth-store";
 import { useToast } from "@/components/ui/toast";
 import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
+import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/components/icons";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,11 @@ export function ProfilePage() {
     resolution: true,
     digest: false,
   });
+
+  // Security / Password state
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [savingPassword, setSavingPassword] = useState(false);
 
   if (!user) return null;
 
@@ -79,11 +85,6 @@ export function ProfilePage() {
   };
 
   const roleName = (user?.role ? String(user.role).replace("_", " ") : "agent");
-
-  // Security / Password state
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [savingPassword, setSavingPassword] = useState(false);
 
   const changePassword = async () => {
     if (!newPassword || newPassword.length < 6) {

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import Db, get_tenant, require_admin, require_team
+from app.core.errors import TicketNotFound
 from app.models import EscalationRule, Tenant
 from app.services.escalation import evaluate
 from app.services.serializers import rule_dto

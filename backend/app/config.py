@@ -17,20 +17,30 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     frontend_url: str = "http://localhost:3000"
 
+    # Error tracking
+    sentry_dsn: str = ""  # Empty = disabled (dev)
+
     # Auth
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     reset_token_expire_minutes: int = 60
     algorithm: str = "HS256"
 
+    # Human assist (soft handoff): if no agent answers within this window, the
+    # KB-gap question hard-escalates to the team so the customer isn't left hanging.
+    human_assist_timeout_minutes: int = 5
+
     # Groq
     groq_api_key: str = ""
-    groq_chat_model: str = "llama-3.3-70b-versatile"
+    groq_chat_model: str = "openai/gpt-oss-120b"
     groq_stt_model: str = "whisper-large-v3-turbo"
 
     # AI replies
     max_reply_words: int = 200
     ai_guardrails: bool = True
+    # Quiet window: consecutive customer messages within this many seconds are
+    # merged and answered as ONE reply (burst protection).
+    ai_buffer_seconds: int = 5
 
     # Vector DB
     chroma_data_dir: str = "./chroma_data"
@@ -59,6 +69,7 @@ class Settings(BaseSettings):
 
     # Super admin bootstrap
     super_admin_email: str = "root@portal.ng"
+    super_admin_password: str = "change-me-now"
 
     # Invites
     invite_expire_days: int = 3
@@ -86,6 +97,12 @@ class Settings(BaseSettings):
     task_queue_enabled: bool = False  # True in production with Redis
     task_max_retries: int = 3
     task_retry_delay: int = 30
+
+    # Paystack
+    paystack_secret_key: str = "sk_test_af52f95632e83a2b890989a6719445aff4088b45"
+    paystack_public_key: str = "pk_test_94b282958f077490051507b1ed5f81c85196bfcb"
+    paystack_webhook_secret: str = ""
+    paystack_base_url: str = "https://api.paystack.co"
 
     @property
     def cors_origin_list(self) -> list[str]:

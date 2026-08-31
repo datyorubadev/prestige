@@ -1,4 +1,5 @@
 import type { SessionUser } from "@/lib/types";
+import { setTenantTimezone } from "@/lib/time";
 
 /**
  * Module-level session store shared by the auth provider (src/lib/auth.tsx)
@@ -28,6 +29,11 @@ let refreshToken: string | null =
   typeof window !== "undefined" ? window.localStorage.getItem(REFRESH_KEY) : null;
 let sessionUser: SessionUser | null =
   typeof window !== "undefined" ? readUserFromStorage() : null;
+
+// Sync the tenant timezone formatter with whatever session is restored.
+if (typeof window !== "undefined" && sessionUser) {
+  setTenantTimezone(sessionUser.timezone);
+}
 
 function readUserFromStorage(): SessionUser | null {
   try {
@@ -95,6 +101,7 @@ export function setAccessToken(token: string | null): void {
 
 export function setSessionUser(user: SessionUser | null): void {
   sessionUser = user;
+  setTenantTimezone(user?.timezone);
   if (typeof window !== "undefined") {
     if (user) window.localStorage.setItem(USER_KEY, JSON.stringify(user));
     else window.localStorage.removeItem(USER_KEY);

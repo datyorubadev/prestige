@@ -20,6 +20,7 @@ import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { LabelChip } from "@/components/ui/label-chip";
 import { Tooltip } from "@/components/ui/tooltip";
 import { avatarColorFor, cn, isResolved, ticketNumberFor } from "@/lib/utils";
+import { fmtDateTime } from "@/lib/time";
 import { MentionText } from "@/components/ui/mention-text";
 import type {
   AgentUser,
@@ -301,7 +302,7 @@ export function ContextRail({
               <div className="rounded-md bg-info-soft px-3 py-2 text-center">
                 <p className="text-[11px] font-semibold text-info">
                   <Icon name="clock" size={12} className="mr-1 inline" />
-                  Snoozed until {new Date(ticket.snoozedUntil).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                  Snoozed until {fmtDateTime(ticket.snoozedUntil)}
                 </p>
               </div>
               <button

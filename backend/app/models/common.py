@@ -69,3 +69,4 @@ class NotificationType(str, Enum):
     NEW_REPLY = "new_reply"
     SUSPENSION = "suspension"
     SYSTEM = "system"
+    HUMAN_ASSIST = "human_assist"
