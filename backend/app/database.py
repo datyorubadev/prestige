@@ -52,6 +52,27 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _ensure_bootstrap_admin() -> None:
+    """First-run bootstrap: when the DB has no users at all (fresh install),
+    create the platform super-admin from SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD
+    so there is always a guaranteed way into the app. Idempotent — never
+    touches an existing user."""
+    from app.core.security import hash_password
+    from app.models import User
+
+    with SessionLocal() as db:
+        if db.query(User).first():
+            return
+        db.add(User(
+            email=settings.super_admin_email,
+            password_hash=hash_password(settings.super_admin_password),
+            full_name="Platform Admin",
+            role="super_admin",
+            is_active=True,
+        ))
+        db.commit()
+
+
 # Column additions applied to already-seeded databases (SQLite has no native
 # ALTER-IF-MISSING). Each entry is (table, column, DDL type with default).
 _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
@@ -207,6 +228,7 @@ def migrate_schema() -> None:
             _backfill_ticket_numbers()
         except Exception:
             pass  # Skip seed-data on fresh DBs (no demo tenants/users yet)
+        _ensure_bootstrap_admin()
     else:
         # PostgreSQL behind PgBouncer (Neon): create DDL engine with
         # AUTOCOMMIT + no pooling so each DDL statement commits immediately.
@@ -237,6 +259,7 @@ def migrate_schema() -> None:
             _backfill_ticket_numbers()
         except Exception:
             pass  # Skip seed-data on fresh DBs (no demo tenants/users yet)
+        _ensure_bootstrap_admin()
 
 
 def _backfill_ticket_numbers() -> None:

@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     rate_limit_admin_per_min: int = 30
 
     # Super admin bootstrap
-    super_admin_email: str = "root@portal.ng"
+    super_admin_email: str = "admin@prestige.io"
     super_admin_password: str = "change-me-now"
 
     # Invites
