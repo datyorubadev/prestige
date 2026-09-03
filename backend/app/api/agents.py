@@ -12,6 +12,7 @@ from app.models import Invite, Tenant, TenantMember, User
 from app.models.common import InviteRole, Role
 from app.services.event_bus import publish_event
 from app.services.serializers import agent_dto
+from app.services.email_service import send_mail
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -88,6 +89,8 @@ def invite_agent(body: AgentInvite, db: Db, tenant: Tenant = Depends(get_tenant)
     ))
     db.commit()
     db.refresh(member)
+    url = f"{settings.frontend_url.rstrip('/')}/invite/{token}"
+    send_mail(email, f"You're invited to {tenant.business_name} on Prestige", f"Join {tenant.business_name}:\n\n{url}\n\nLink expires in {settings.invite_expire_days} days.")
     return _dto(db, tenant, member)
 
 
@@ -105,6 +108,8 @@ def resend_invite(agent_id: str, db: Db, tenant: Tenant = Depends(get_tenant),
     member.last_seen = None  # back to pending
     db.commit()
     db.refresh(member)
+    url = f"{settings.frontend_url.rstrip('/')}/invite/{token}"
+    send_mail(member.email, f"You're invited to {tenant.business_name} on Prestige", f"Join {tenant.business_name}:\n\n{url}\n\nLink expires in {settings.invite_expire_days} days.")
     return _dto(db, tenant, member)
 
 

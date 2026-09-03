@@ -60,7 +60,7 @@ def events(
 
 
 @ws_router.websocket("/ws/events")
-async def ws_events(websocket: WebSocket, token: str | None = None) -> None:
+async def ws_events(websocket: WebSocket, token: str | None = None, since: str | None = None) -> None:
     await websocket.accept()
     db = SessionLocal()
     try:
@@ -73,7 +73,9 @@ async def ws_events(websocket: WebSocket, token: str | None = None) -> None:
     finally:
         db.close()
 
-    cursor: str | None = latest_cursor()
+    # Resume from the client's last-seen cursor so events published while the
+    # socket was down (e.g. during a tab switch / reconnect) are not lost.
+    cursor: str | None = latest_cursor() if since is None else since
     try:
         while True:
             try:
@@ -116,8 +118,6 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
     finally:
         db.close()
 
-    await websocket.send_text(json.dumps({"who": "system", "text": f"{agent_name} joined the conversation"}))
-
     cursor: str | None = latest_cursor()
     try:
         while True:
@@ -125,7 +125,7 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
                 cursor = event["request_id"]
                 if event.get("type") == "message_created":
                     data = event.get("data") or {}
-                    if data.get("ticket_id") == ticket.id and data.get("who") in ("human_agent", "ai", "system"):
+                    if data.get("ticket_id") == ticket.id and data.get("who") in ("human_agent", "ai"):
                         msg = {
                             "who": data["who"],
                             "text": data["text"],
@@ -186,7 +186,7 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
                         escalation.apply(db, tenant, ticket, fired)
                     await websocket.send_text(json.dumps({
                         "who": "system",
-                        "text": f"Transferred to {agent_name} — an agent will reply shortly."
+                        "text": "Thanks for waiting — one of our support team will reply shortly."
                     }))
                     publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
                     continue

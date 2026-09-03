@@ -95,13 +95,13 @@ export class ApiClientError extends Error {
 
 export async function apiRequest<T>(
   path: string,
-  options: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown } = {},
+  options: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; fresh?: boolean } = {},
 ): Promise<T> {
   const method = options.method ?? "GET";
   if (USE_MOCK) return mockRoute<T>(method, path, options.body);
 
   // Deduplicate concurrent identical GET requests + serve from cache
-  if (method === "GET") {
+  if (method === "GET" && !options.fresh) {
     const cached = getCache.get(path);
     const now = Date.now();
     // If we have a fresh cache hit, return immediately
@@ -138,7 +138,7 @@ export async function apiRequest<T>(
 }
 
 export const api = {
-  get: <T>(path: string) => apiRequest<T>(path),
+  get: <T>(path: string, opts?: { fresh?: boolean }) => apiRequest<T>(path, { fresh: opts?.fresh }),
   post: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "POST", body }),
   put: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "PUT", body }),
   patch: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "PATCH", body }),

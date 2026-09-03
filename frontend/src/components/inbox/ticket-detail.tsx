@@ -231,6 +231,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
 
           setTicket((prev) => {
             if (!prev) return null;
+            if (realMsgId && prev.msgs.some((m) => m.id === realMsgId)) return prev;
             if (prev.msgs.some((m) => m.text === text && m.who === who && (!attachments.length || m.attachments?.length === attachments.length))) {
               return prev;
             }

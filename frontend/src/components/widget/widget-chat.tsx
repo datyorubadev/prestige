@@ -133,7 +133,10 @@ export function WidgetChat({
         if (rawWho === "human_agent") rawWho = "agent";
         const who = rawWho as WidgetMsg["who"];
         const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as WidgetAttachment[]) : [];
-        if ((!text && !attachments.length) || who === "customer") return;
+        // Skip customer echo and internal/system events — only the AI + human
+        // replies are customer-facing. Escalation/system notes stay private.
+        if (!text && !attachments.length) return;
+        if (who === "customer" || who === "system") return;
         setMsgs((prev) => {
           if (prev.some((m) => m.text === text && m.who === who && (!attachments.length || m.attachments?.length === attachments.length))) return prev;
           return [...prev, { who, text, attachments: attachments.length ? attachments : undefined }];
@@ -376,6 +379,61 @@ export function WidgetChat({
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: "smooth" });
   }, [msgs, typing, ws.transcript, open, csat]);
+
+  // Persist the active session across reloads and restore its full trail so
+  // agent replies stay visible to the customer (escalation is private to staff).
+  useEffect(() => {
+    const key = `prestige_session_${tenant.id}`;
+    if (sessionId) window.localStorage.setItem(key, sessionId);
+    else window.localStorage.removeItem(key);
+  }, [tenant.id, sessionId]);
+
+  useEffect(() => {
+    if (sessionId) return;
+    try {
+      const saved = window.localStorage.getItem(`prestige_session_${tenant.id}`);
+      if (saved) setSessionId(saved);
+    } catch {
+      // storage unavailable — start fresh
+    }
+  }, [tenant.id, sessionId]);
+
+  // One-shot history load on connect so the customer sees the full trail,
+  // including replies an agent sent while the widget was closed.
+  useEffect(() => {
+    if (!sessionId) return;
+    let active = true;
+    void (async () => {
+      let res: { messages?: { who: string; text: string; attachments?: WidgetAttachment[] }[] };
+      try {
+        res = await api.get(
+          `/widget/messages?ticketId=${encodeURIComponent(sessionId)}`,
+        );
+      } catch {
+        return;
+      }
+      if (!active) return;
+      const rows = (res.messages ?? []).filter(
+        (m) => m.who === "ai" || m.who === "ai_bot" || m.who === "human_agent",
+      );
+      if (rows.length === 0) return;
+      setMsgs((prev) => {
+        const next = [...prev];
+        let changed = false;
+        for (const r of rows) {
+          const who = r.who === "human_agent" ? ("agent" as const) : ("ai" as const);
+          if (!next.some((c) => c.text === r.text && c.who === who)) {
+            next.push({ who, text: r.text, attachments: r.attachments?.length ? r.attachments : undefined });
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [sessionId]);
 
   // Focus management (§4.5): trap focus inside the open dialog, restore it to
   // the launcher on close.
@@ -620,19 +678,19 @@ export function WidgetChat({
   };
 
   const chatMsgs = useMemo(() => {
-    if (!handoff) return msgs;
     const combined = [...msgs];
-    for (const m of ws.transcript) {
-      if (!combined.some((c) => c.text === m.text && c.who === m.who)) {
-        combined.push(m);
+    for (const t of ws.transcript) {
+      const rawWho = t.who as string;
+      // Transcript mirrors the chat socket (agent + AI replies). System rows
+      // (escalation/join notes) are private to staff and never customer-facing.
+      if (rawWho === "system" || rawWho === "customer") continue;
+      const who: WidgetMsg["who"] = rawWho === "ai" || rawWho === "ai_bot" ? "ai" : "agent";
+      if (!combined.some((c) => c.text === t.text && c.who === who)) {
+        combined.push({ who, text: t.text, attachments: t.attachments });
       }
     }
     return combined;
-  }, [msgs, ws.transcript, handoff]);
-
-  // Handoff lifecycle: escalated (AI), connecting (waiting for the WS join),
-  // then connected (human). Drives the header status + composer affordances.
-  const connecting = handoff && !ws.connected && !ws.resolved;
+  }, [msgs, ws.transcript]);
 
   const stateLine =
     presence === "online" ? (
@@ -741,7 +799,7 @@ export function WidgetChat({
               ? isMobileFrame
                 ? "absolute inset-0 z-50 h-full w-full rounded-[24px]"
                 : "fixed inset-0 z-50 h-[100dvh] w-full rounded-none"
-              : "w-[390px] max-w-[calc(100vw-24px)] h-[700px] max-h-[calc(100dvh-80px)] animate-pop rounded-[20px] mb-2",
+              : "w-[390px] max-w-[calc(100vw-24px)] h-[600px] max-h-[calc(100dvh-80px)] animate-pop rounded-[20px] mb-2",
           )}
         >
           {/* Cover / display image banner (optional, tenant-managed) */}
@@ -781,7 +839,7 @@ export function WidgetChat({
                 {tenant.botName ?? `${tenant.name} Assistant`}
               </p>
               <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-white/90 font-medium">
-                {connecting ? "connecting to human agent…" : stateLine}
+                {stateLine}
               </p>
             </div>
             <div className="ml-auto flex items-center gap-1">
@@ -824,13 +882,13 @@ export function WidgetChat({
             ref={bodyRef}
             className={cn(
               "flex flex-col gap-2.5 overflow-y-auto bg-slate-50/60 p-4",
-              mobile ? "min-h-0 flex-1" : "max-h-[600px] min-h-[340px] flex-1",
+              mobile ? "min-h-0 flex-1" : "max-h-[500px] min-h-[240px] flex-1",
             )}
           >
-            {connecting && (
+            {handoff && (
               <div className="flex items-center gap-1.5 self-center rounded-full bg-primary-soft px-3 py-1 text-[11px] font-semibold text-primary-dark">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-                Connecting you to {tenant.name}&apos;s team…
+                One of our specialists is helping — reply here anytime
               </div>
             )}
             {needsEmail ? (
@@ -911,14 +969,10 @@ export function WidgetChat({
                 <WidgetInput
                   onSend={(t, atts) => void send(t, atts)}
                   onTyping={emitTyping}
-                  disabled={connecting}
+                  disabled={false}
                   placeholder={
                     presence === "online"
-                      ? connecting
-                        ? "Connecting you to a human…"
-                        : handoff && ws.connected
-                          ? `Reply to ${agentName}…`
-                          : "Type a message…"
+                      ? "Type a message…"
                       : "We'll reply to your email — leave a message…"
                   }
                 />
@@ -1059,12 +1113,7 @@ function Bubble({
   if (m.who === "agent" || m.who === "human_agent") {
     return (
       <div className={cn("flex max-w-[88%] flex-col gap-1 self-start", grouped && "mt-[-6px]")}>
-        <p className="text-[10px] font-bold uppercase tracking-wider text-text-3 pl-1">{agentName}</p>
-        <div className="flex flex-col rounded-[18px] rounded-tl-xs bg-info-soft px-3.5 py-2.5 text-[12.5px] leading-snug text-text shadow-xs">
-          <span className="mb-1 flex items-center gap-1 text-[10.5px] font-semibold text-info">
-            <Icon name="info" size={13} />
-            Human agent
-          </span>
+        <div className="flex flex-col rounded-[18px] rounded-tl-xs bg-white px-3.5 py-2.5 text-[12.5px] leading-relaxed text-text shadow-xs">
           {m.text && <RichTextContent text={m.text} />}
           <InlineAttachments attachments={m.attachments} onImageClick={onImageClick} />
         </div>

@@ -114,7 +114,7 @@ export function TicketList() {
 
   const refreshTickets = useCallback(() => {
     void api
-      .get<Ticket[]>("/tickets")
+      .get<Ticket[]>("/tickets", { fresh: true })
       .then(setTickets)
       .catch(() => {});
   }, []);

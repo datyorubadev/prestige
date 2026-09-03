@@ -126,6 +126,7 @@ def _deliver_with_retry(db: Session, endpoint: WebhookEndpoint, event: str,
 
     # All retries exhausted
     last_result["attempts"] = MAX_RETRIES
+    last_result["status"] = "failed"
     return last_result
 
 

@@ -37,7 +37,7 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
 
   const loadTickets = useCallback(() => {
     void api
-      .get<Ticket[]>("/tickets")
+      .get<Ticket[]>("/tickets", { fresh: true })
       .then((t) => setTickets(t ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -68,6 +68,16 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
           next.unshift(updated);
           return next;
         });
+      },
+      ticket_created: () => {
+        // Don't try to fabricate a partial Ticket with a dozen required fields —
+        // refetch the whole list so the new ticket renders correctly.
+        loadTickets();
+      },
+      ticket_deleted: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (!tid) return;
+        setTickets((prev) => prev.filter((t) => t.id !== tid));
       },
       ticket_updated: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");

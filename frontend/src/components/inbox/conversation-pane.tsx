@@ -317,8 +317,9 @@ export function ConversationPane({
             m.kind !== "note" &&
             prev.kind !== "note";
           const isMatch = searchQuery.length > 1 && m.text.toLowerCase().includes(searchQuery.toLowerCase());
+          const msgKey = m.id && !m.id.startsWith("msg-") ? m.id : `m-${i}-${m.who}-${m.text.length}`;
           return (
-            <div key={m.id ?? `m-${i}`} className={cn("space-y-2", isMatch && "rounded-md bg-warning-soft/30 ring-1 ring-warning/30 -mx-1 px-1 py-0.5")}>
+            <div key={msgKey} className={cn("space-y-2", isMatch && "rounded-md bg-warning-soft/30 ring-1 ring-warning/30 -mx-1 px-1 py-0.5")}>
               {showDivider && <DayDivider label={dayLabel(m.timestamp)} />}
               <MessageBubble
                 message={m}

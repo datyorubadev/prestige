@@ -36,6 +36,7 @@ from app.schemas.auth import (
     SwitchTenantRequest,
 )
 from app.services.serializers import session_user
+from app.services.email_service import send_mail
 
 logger = logging.getLogger(__name__)
 
@@ -267,8 +268,8 @@ def forgot_password(body: ForgotPasswordRequest, db: Db) -> dict:
         if settings.email_mock:
             logger.info("reset link for %s: /reset-password?token=%s", body.email, token)
         else:
-            # real SMTP send would go here via email_service
-            logger.info("reset requested for %s", body.email)
+            url = f"{settings.frontend_url.rstrip('/')}/reset-password?token={token}"
+            send_mail(body.email, "Reset your password", f"Use this link to reset your password:\n\n{url}\n\nIt expires in {settings.reset_token_expire_minutes} minutes.")
         return {"ok": True}
     return {"ok": True}
 

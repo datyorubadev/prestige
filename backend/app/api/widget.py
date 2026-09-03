@@ -77,6 +77,9 @@ def widget_messages(ticketId: str, db: Db) -> dict:
         return {"messages": []}
     messages = []
     for m in ticket.messages:
+        if m.sender_type == "system":
+            # Internal notes are private to staff — never surface on the widget.
+            continue
         who = (
             "customer"
             if m.sender_type == "customer"

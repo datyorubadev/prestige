@@ -83,7 +83,11 @@ function stopPolling() {
 }
 
 function openSocket(token: string | null) {
-  const url = `${wsEndpoint("/ws/events")}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (cursorRef) params.set("since", cursorRef);
+  const qs = params.toString();
+  const url = `${wsEndpoint("/ws/events")}${qs ? `?${qs}` : ""}`;
   let socket: WebSocket;
   try {
     socket = new WebSocket(url);
