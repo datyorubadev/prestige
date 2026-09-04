@@ -80,6 +80,8 @@ def _relative_time(dt: datetime, now: datetime | None = None) -> str:
     now = now or datetime.utcnow()
     delta = max(now - dt, __import__("datetime").timedelta(0))
     minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return "Just now"
     if minutes < 60:
         return f"{minutes}m"
     hours = minutes // 60
@@ -208,6 +210,16 @@ def _ticket_base(ticket: Ticket, now: datetime | None = None) -> dict:
         sla = "overdue" if ticket.sla_seconds_left < 0 else f"{int(ticket.sla_seconds_left // 60)}m left"
     elif ticket.status in ("open", "in_progress", "escalated"):
         sla = "1h left"
+    last_msg = getattr(ticket, "_last_message", None)
+    if last_msg is None and getattr(ticket, "messages", None):
+        last_msg = ticket.messages[-1] if ticket.messages else None
+
+    last_msg_ts = getattr(last_msg, "timestamp", None)
+    candidates = [ticket.created_at, ticket.updated_at]
+    if last_msg_ts:
+        candidates.append(last_msg_ts)
+    last_active = max((d for d in candidates if d is not None), default=ticket.created_at)
+
     return {
         "id": ticket.id,
         "ticketNumber": format_ticket_number(ticket),
@@ -220,7 +232,8 @@ def _ticket_base(ticket: Ticket, now: datetime | None = None) -> dict:
         "priority": ticket.priority,
         "type": ticket.ticket_type.lower(),
         "sentiment": ticket.sentiment or "Neutral",
-        "time": _relative_time(ticket.created_at, now),
+        "time": _relative_time(last_active, now),
+        "createdAt": _relative_time(ticket.created_at, now),
         "unread": ticket.unread,
         "sla": sla,
         "assignee": assignee_name,
@@ -242,10 +255,10 @@ def ticket_list_dto(ticket: Ticket, now: datetime | None = None) -> dict:
     dto = _ticket_base(ticket, now)
     # Preview comes from the pre-loaded last_message relationship (see list query).
     last_msg = getattr(ticket, "_last_message", None)
-    if last_msg is None and ticket.messages:
+    if last_msg is None and getattr(ticket, "messages", None):
         # Fallback: if messages were accidentally loaded, use the last one.
         last_msg = ticket.messages[-1] if ticket.messages else None
-    dto["preview"] = last_msg.body[:120] if last_msg and last_msg.body else ticket.subject
+    dto["preview"] = last_msg.body[:120] if last_msg and getattr(last_msg, "body", None) else ticket.subject
     return dto
 
 
@@ -254,8 +267,12 @@ def ticket_dto(ticket: Ticket, now: datetime | None = None) -> dict:
     dto = _ticket_base(ticket, now)
     messages = list(ticket.messages) if ticket.messages else []
     last_msg = messages[-1] if messages else None
-    dto["preview"] = last_msg.body[:120] if last_msg and last_msg.body else ticket.subject
+    dto["preview"] = last_msg.body[:120] if last_msg and getattr(last_msg, "body", None) else ticket.subject
     dto["msgs"] = [message_dto(m) for m in messages]
+    if last_msg and getattr(last_msg, "timestamp", None):
+        candidates = [ticket.created_at, ticket.updated_at, last_msg.timestamp]
+        last_active = max((d for d in candidates if d is not None), default=ticket.created_at)
+        dto["time"] = _relative_time(last_active, now)
     return dto
 
 

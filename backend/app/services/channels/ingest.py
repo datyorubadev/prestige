@@ -11,6 +11,7 @@ Every provider webhook (and the simulator) funnels through `ingest_message`:
 import json
 import logging
 import threading
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models import ChannelSetting, Customer, Message, Tenant, Ticket
@@ -78,7 +79,6 @@ def ingest_message(db: Session, channel: ChannelSetting, msg: InboundMessage,
         ensure_ticket_number(db, ticket)
         db.add(ticket)
         db.flush()
-        publish_event("ticket_created", {"ticket_id": ticket.id, "channel": msg.channel})
 
     cust_msg = Message(
         ticket_id=ticket.id, sender_type=MessageSender.CUSTOMER,
@@ -88,17 +88,21 @@ def ingest_message(db: Session, channel: ChannelSetting, msg: InboundMessage,
     )
     db.add(cust_msg)
     ticket.unread = True
+    ticket.updated_at = datetime.utcnow()
     db.flush()
     db.refresh(cust_msg)
-    publish_event("message_created", {"ticket_id": ticket.id, "message_id": cust_msg.id, "who": "customer", "text": msg.text, "channel": msg.channel})
 
     fired = escalation.evaluate(db, tenant, ticket, msg.text)
     if fired:
         escalation.apply(db, tenant, ticket, fired)
-        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
+        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     else:
         db.commit()
     db.refresh(ticket)
+
+    if is_new:
+        publish_event("ticket_created", {"ticket_id": ticket.id, "channel": msg.channel}, tenant_id=tenant.id)
+    publish_event("message_created", {"ticket_id": ticket.id, "message_id": cust_msg.id, "who": "customer", "text": msg.text, "channel": msg.channel}, tenant_id=tenant.id)
 
     replied = False
     config = json.loads(channel.provider_config or "{}")
@@ -179,10 +183,11 @@ def _flush_channel_reply(tenant_id: str, ticket_id: str, channel_name: str) -> N
             )
             db.add(ai_msg)
             ticket.unread = True
+            ticket.updated_at = datetime.utcnow()
             db.commit()
             db.refresh(ai_msg)
-            publish_event("message_created", {"ticket_id": ticket.id, "message_id": ai_msg.id, "who": "ai", "text": reply, "channel": channel_name})
-            publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+            publish_event("message_created", {"ticket_id": ticket.id, "message_id": ai_msg.id, "who": "ai", "text": reply, "channel": channel_name}, tenant_id=ticket.tenant_id)
+            publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=ticket.tenant_id)
             dispatch_outbound(db, ticket, reply, "ai")
     finally:
         db.close()

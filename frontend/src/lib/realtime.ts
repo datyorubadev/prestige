@@ -31,7 +31,7 @@ let nextId = 1;
 let cursorRef: string | null = null;
 const connectionListeners = new Set<(connected: boolean) => void>();
 
-const AUTH_RETRY_COOLDOWN = 10_000;
+const AUTH_RETRY_COOLDOWN = 2_000;
 
 function setConnected(v: boolean) {
   sharedConnected = v;
@@ -72,7 +72,7 @@ function startPolling() {
     } catch {
       // keep polling on transient failures
     }
-  }, 10_000);
+  }, 3_000);
 }
 
 function stopPolling() {

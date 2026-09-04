@@ -1,14 +1,47 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+// Shared pending search parameters across all hook instances on the page
+let sharedPendingParams: URLSearchParams | null = null;
+let microtaskScheduled = false;
+let activeRouter: ReturnType<typeof useRouter> | null = null;
+let activePathname = "";
+
+// Subscribers for real-time key updates across concurrent hook instances
+const subscribers = new Map<string, Set<(val: string) => void>>();
+
+function notifySubscribers(key: string, val: string) {
+  const set = subscribers.get(key);
+  if (set) {
+    for (const fn of set) {
+      fn(val);
+    }
+  }
+}
+
+function flushUrlUpdates() {
+  if (sharedPendingParams && activeRouter) {
+    const qs = sharedPendingParams.toString();
+    const target = qs ? `${activePathname}?${qs}` : activePathname;
+    if (typeof window !== "undefined") {
+      window.history.replaceState(window.history.state, "", target);
+    }
+    activeRouter.replace(target, { scroll: false });
+    sharedPendingParams = null;
+  }
+}
 
 /**
  * URL search params as app state (Next.js App Router).
  *
  * State survives back/forward, refresh, and link sharing because the URL is
- * the single source of truth. Writes use router.replace (no history spam) and
- * never scroll.
+ * the source of truth. Writes use batched router.replace and immediate local
+ * state for zero-latency UI responsiveness.
+ *
+ * Sequential writes (e.g. setView(v) + setPage(1)) compose safely without
+ * clobbering each other.
  *
  *   const [filter, setFilter] = useUrlState("filter", "all");
  */
@@ -20,27 +53,75 @@ export function useUrlState(
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  // router.replace is async and each render's `searchParams` is a frozen
-  // snapshot, so two setters called in the same event handler would each
-  // rebuild the URL from the same stale snapshot and clobber each other
-  // (e.g. a tab click doing setView(v) + setPage(1) reverted view to default).
-  // Mirror the latest params in a ref so sequential writes compose instead.
-  const paramsRef = useRef(new URLSearchParams(searchParams.toString()));
-  useEffect(() => {
-    paramsRef.current = new URLSearchParams(searchParams.toString());
-  }, [searchParams]);
+  // Local state provides instant UI response without waiting for router.replace cycle
+  const [value, setValueState] = useState<string>(() => {
+    return searchParams.get(key) ?? defaultValue;
+  });
 
-  const value = searchParams.get(key) ?? defaultValue;
+  // Keep router and pathname up to date
+  useEffect(() => {
+    activeRouter = router;
+    activePathname = pathname;
+  }, [router, pathname]);
+
+  // Subscribe to external state changes for this key
+  useEffect(() => {
+    let set = subscribers.get(key);
+    if (!set) {
+      set = new Set();
+      subscribers.set(key, set);
+    }
+    set.add(setValueState);
+    return () => {
+      set?.delete(setValueState);
+      if (set && set.size === 0) subscribers.delete(key);
+    };
+  }, [key]);
+
+  // Synchronize when searchParams changes (e.g. browser Back / Forward or external push)
+  useEffect(() => {
+    const fromUrl = searchParams.get(key) ?? defaultValue;
+    setValueState(fromUrl);
+  }, [searchParams, key, defaultValue]);
 
   const setValue = useCallback(
     (next: string) => {
-      const params = paramsRef.current;
-      if (!next || next === defaultValue) params.delete(key);
-      else params.set(key, next);
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      activeRouter = router;
+      activePathname = pathname;
+
+      // Update local state and any peer hooks immediately
+      const nextVal = next || defaultValue;
+      setValueState(nextVal);
+      notifySubscribers(key, nextVal);
+
+      // Initialize sharedPendingParams from current window or searchParams
+      if (!sharedPendingParams) {
+        sharedPendingParams = new URLSearchParams(
+          typeof window !== "undefined" ? window.location.search : searchParams.toString(),
+        );
+      }
+
+      if (!next || next === defaultValue) {
+        sharedPendingParams.delete(key);
+      } else {
+        sharedPendingParams.set(key, next);
+      }
+
+      // If updating view, also clear any legacy ?mine param
+      if (key === "view") {
+        sharedPendingParams.delete("mine");
+      }
+
+      // Schedule a single consolidated URL update in the next microtask
+      if (!microtaskScheduled) {
+        microtaskScheduled = true;
+        queueMicrotask(() => {
+          microtaskScheduled = false;
+          flushUrlUpdates();
+        });
+      }
     },
-    [router, pathname, key, defaultValue],
+    [router, pathname, searchParams, key, defaultValue],
   );
 
   return [value, setValue] as const;
@@ -59,13 +140,32 @@ export function useUrlParams(): {
     () => ({
       get: (key: string, def = "") => searchParams.get(key) ?? def,
       setMany: (updates: Record<string, string | null>) => {
-        const params = new URLSearchParams(searchParams.toString());
-        for (const [k, v] of Object.entries(updates)) {
-          if (v === null || v === "") params.delete(k);
-          else params.set(k, v);
+        activeRouter = router;
+        activePathname = pathname;
+
+        if (!sharedPendingParams) {
+          sharedPendingParams = new URLSearchParams(
+            typeof window !== "undefined" ? window.location.search : searchParams.toString(),
+          );
         }
-        const qs = params.toString();
-        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+
+        for (const [k, v] of Object.entries(updates)) {
+          if (v === null || v === "") {
+            sharedPendingParams.delete(k);
+            notifySubscribers(k, "");
+          } else {
+            sharedPendingParams.set(k, v);
+            notifySubscribers(k, v);
+          }
+        }
+
+        if (!microtaskScheduled) {
+          microtaskScheduled = true;
+          queueMicrotask(() => {
+            microtaskScheduled = false;
+            flushUrlUpdates();
+          });
+        }
       },
     }),
     [router, pathname, searchParams],

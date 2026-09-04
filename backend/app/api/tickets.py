@@ -14,7 +14,7 @@ from app.models.common import MessageSender, NotificationType, TicketStatus, Tic
 from app.services.event_bus import publish_event
 from app.services.serializers import ensure_ticket_number, format_ticket_number, message_dto, ticket_dto, ticket_list_dto
 
-_AGENT_ALLOWED_STATUSES = {"open", "in_progress", "waiting_for_customer", "waiting_internal", "resolved"}
+_AGENT_ALLOWED_STATUSES = {"open", "in_progress", "waiting_for_customer", "waiting_internal", "resolved", "escalated"}
 _CUSTOMER_ALLOWED_STATUSES = {"open", "closed"}
 
 def _check_status_transition(user_role: str, new_status: str) -> None:
@@ -177,7 +177,7 @@ def list_tickets(
     )
     if user.role == "agent" and membership and membership.inbox_scope in ("assigned", "own", "team"):
         if membership.inbox_scope in ("assigned", "own"):
-            qry = qry.filter(Ticket.assignee_id == user.id)
+            qry = qry.filter(or_(Ticket.assignee_id == user.id, Ticket.status == "escalated"))
         else:
             my_teams = [t for t in user.teams if t.tenant_id == tenant.id]
             team_ids = [t.id for t in my_teams]
@@ -186,6 +186,7 @@ def list_tickets(
                 Ticket.team_id.in_(team_ids),
                 Ticket.assignee_id.in_(member_ids),
                 Ticket.assignee_id.is_(None),
+                Ticket.status == "escalated",
             ))
     if status and status != "all":
         qry = qry.filter(Ticket.status == status)
@@ -271,6 +272,7 @@ def list_tickets(
             db.query(
                 Message.ticket_id,
                 Message.body,
+                Message.timestamp,
                 func.row_number().over(
                     partition_by=Message.ticket_id,
                     order_by=Message.timestamp.desc(),
@@ -280,16 +282,20 @@ def list_tickets(
             .subquery()
         )
         last_msgs = (
-            db.query(subq.c.ticket_id, subq.c.body)
+            db.query(subq.c.ticket_id, subq.c.body, subq.c.timestamp)
             .filter(subq.c.rn == 1)
             .all()
         )
-        last_msg_map: dict[str, str] = {}
-        for mid, body in last_msgs:
-            last_msg_map[mid] = body  # store body string directly for preview
+        last_msg_map: dict[str, tuple[str, datetime]] = {}
+        for tid, body, ts in last_msgs:
+            last_msg_map[tid] = (body, ts)
         # Attach as a lightweight attribute so ticket_list_dto can read it.
         for t in tickets:
-            t._last_message = type("_M", (), {"body": last_msg_map.get(t.id, "")})()
+            item = last_msg_map.get(t.id)
+            if item:
+                t._last_message = type("_M", (), {"body": item[0], "timestamp": item[1]})()
+            else:
+                t._last_message = None
 
     return [ticket_list_dto(t) for t in tickets]
 
@@ -333,7 +339,7 @@ def create_ticket(body: TicketCreate, db: Db, tenant: Tenant = Depends(get_tenan
     _log_ticket_event(db, ticket, user, "ticket_created",
                       detail=f"Ticket created via {channel} for {customer.full_name or email} — “{ticket.subject}”")
     db.commit()
-    publish_event("ticket_created", {"ticket_id": ticket.id, "email": email})
+    publish_event("ticket_created", {"ticket_id": ticket.id, "email": email, "channel": channel}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -377,7 +383,7 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             TenantMember.user_id == user.id, TenantMember.tenant_id == tenant.id
         ).first()
         if membership and membership.inbox_scope in ("assigned", "own"):
-            if ticket.assignee_id != user.id:
+            if ticket.assignee_id != user.id and ticket.status != "escalated":
                 from app.core.errors import InsufficientPrivileges
                 raise InsufficientPrivileges("You can only update tickets assigned to you")
 
@@ -405,6 +411,14 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             _new_system_msgs.append(_status_msg)
             if body.status == "escalated":
                 _escalated = True
+                ticket.escalated_at = datetime.utcnow()
+                if not ticket.ai_summary:
+                    last_cust_msg = next(
+                        (m.body for m in reversed(ticket.messages or []) if m.sender_type == MessageSender.CUSTOMER),
+                        None,
+                    )
+                    ticket.ai_summary = f"Escalated by {user.full_name} — “{(last_cust_msg or ticket.subject)[:140]}”"
+                    ticket.ai_sentiment = "Manual escalation"
         if body.status in ("resolved", "closed"):
             ticket.resolved_at = ticket.resolved_at or datetime.utcnow()
     if "assignee_id" in patch:
@@ -484,7 +498,7 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             )
             db.add(_ai_msg)
             _new_system_msgs.append(_ai_msg)
-            publish_event("ticket_updated", {"ticket_id": ticket.id})
+            publish_event("ticket_updated", {"ticket_id": ticket.id}, tenant_id=tenant.id)
     if body.labels is not None or body.label_ids is not None:
         old_labels = ", ".join(sorted(l.name for l in ticket.labels)) or "none"
         if body.labels is not None:
@@ -513,15 +527,25 @@ def update_ticket(ticket_id: str, body: TicketUpdate, db: Db,
             "ticket_id": ticket.id, "message_id": _sys_msg.id,
             "who": "system", "text": _sys_msg.body,
             "author": _sys_msg.sender_name, "kind": "note",
-        })
+        }, tenant_id=tenant.id)
     if _escalated:
-        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": "escalated"})
+        publish_event("ticket_escalated", {
+            "ticket_id": ticket.id,
+            "status": "escalated",
+            "priority": ticket.priority,
+            "assist": {
+                "reason": ticket.ai_sentiment or "AI triage",
+                "summary": ticket.ai_summary or "",
+                "chunks": [],
+                "suggest": "",
+            },
+        }, tenant_id=tenant.id)
     if _assigned_to_id is not None:
         publish_event("ticket_assigned", {
             "ticket_id": ticket.id, "assignee_id": _assigned_to_id,
             "assigned_by": user.id, "assigned_by_name": user.full_name,
-        })
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+        }, tenant_id=tenant.id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -573,8 +597,8 @@ def send_message(ticket_id: str, body: MessageCreate, db: Db,
     }
     if sender_type_enum == MessageSender.SYSTEM:
         event_data["kind"] = "note"
-    publish_event("message_created", event_data)
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    publish_event("message_created", event_data, tenant_id=tenant.id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     from app.services.channels.outbound import dispatch_outbound
 
     dispatch_outbound(db, ticket, body.body, "agent")
@@ -606,8 +630,8 @@ def update_message(ticket_id: str, message_id: str, body: MessageUpdate, db: Db,
     publish_event("message_updated", {
         "ticket_id": ticket.id, "message_id": message_id,
         "body": body.body, "edited": True,
-    })
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    }, tenant_id=tenant.id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     return message_dto(msg)
 
 
@@ -626,7 +650,7 @@ def delete_message(ticket_id: str, message_id: str, db: Db,
     db.commit()
     _log_ticket_event(db, ticket, user, "message_deleted",
                       detail=f'Message deleted: "{deleted_body}"')
-    publish_event("message_deleted", {"ticket_id": ticket.id, "message_id": message_id})
+    publish_event("message_deleted", {"ticket_id": ticket.id, "message_id": message_id}, tenant_id=tenant.id)
     return {"ok": True}
 
 
@@ -637,29 +661,39 @@ def delete_ticket(ticket_id: str, db: Db,
     ticket = _get_scoped_ticket(db, tenant, ticket_id)
     subject = ticket.subject
     customer_name = ticket.customer.full_name if ticket.customer else "Guest"
+    canonical_id = str(ticket.id)
     
     # Audit log entry (§8 Audit Trail)
     db.add(AuditLog(
         tenant_id=tenant.id,
         user_id=user.id,
         action="delete_ticket",
-        target=f"Ticket {ticket.id}",
         entity_type="ticket",
-        entity_id=ticket.id,
-        detail=f"Ticket '{ticket.id}' ({subject}) deleted by {user.full_name} ({user.role}) for customer {customer_name}",
+        entity_id=canonical_id,
+        detail=f"Ticket '{canonical_id}' ({subject}) deleted by {user.full_name} ({user.role}) for customer {customer_name}",
         result="ok",
     ))
     
-    # Cascade delete messages and label links
+    # Cascade clean up all foreign key references before deleting ticket
+    from app.models.callback import CallbackBooking
+    from app.models.doc_verify import DocVerifyRecord
+    from app.models.kyc import KYCVerificationSession
+
+    db.query(TicketEvent).filter(TicketEvent.ticket_id == canonical_id).delete(synchronize_session=False)
+    db.query(Notification).filter(Notification.ticket_id == canonical_id).delete(synchronize_session=False)
+    db.query(CallbackBooking).filter(CallbackBooking.ticket_id == canonical_id).delete(synchronize_session=False)
+    db.query(DocVerifyRecord).filter(DocVerifyRecord.ticket_id == canonical_id).delete(synchronize_session=False)
+    db.query(KYCVerificationSession).filter(KYCVerificationSession.ticket_id == canonical_id).delete(synchronize_session=False)
+    db.query(Ticket).filter(Ticket.merged_into_id == canonical_id).update({Ticket.merged_into_id: None}, synchronize_session=False)
+
     for msg in list(ticket.messages):
         db.delete(msg)
-    for lbl in list(ticket.labels):
-        ticket.labels.remove(lbl)
+    ticket.labels.clear()
     
     db.delete(ticket)
     db.commit()
-    publish_event("ticket_deleted", {"ticket_id": ticket_id, "tenant_id": tenant.id})
-    return {"ok": True, "id": ticket_id}
+    publish_event("ticket_deleted", {"ticket_id": canonical_id, "tenant_id": tenant.id}, tenant_id=tenant.id)
+    return {"ok": True, "id": canonical_id}
 
 
 # ── Snooze / Remind ──────────────────────────────────────────────
@@ -687,7 +721,7 @@ def snooze_ticket(ticket_id: str, body: SnoozeRequest, db: Db,
     ))
     db.commit()
     db.refresh(ticket)
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -702,7 +736,7 @@ def unsnooze_ticket(ticket_id: str, db: Db,
                       field="snoozed_until", old_value=str(old) if old else None, new_value=None)
     db.commit()
     db.refresh(ticket)
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -755,9 +789,9 @@ def merge_ticket(ticket_id: str, body: MergeRequest, db: Db,
 
     db.commit()
     db.refresh(primary)
-    publish_event("ticket_updated", {"ticket_id": primary.id, "status": primary.status})
+    publish_event("ticket_updated", {"ticket_id": primary.id, "status": primary.status}, tenant_id=tenant.id)
     for sid in secondary_ids:
-        publish_event("ticket_updated", {"ticket_id": sid})
+        publish_event("ticket_updated", {"ticket_id": sid}, tenant_id=tenant.id)
     return {"ticket": ticket_dto(primary), "merged_count": len(merged_numbers), "merged": merged_numbers}
 
 
@@ -807,6 +841,6 @@ def ticket_presence(ticket_id: str, body: PresenceRequest, db: Db,
         "user_id": user.id,
         "user_name": user.full_name,
         "action": body.action,
-    })
+    }, tenant_id=tenant.id)
     return {"ok": True}
 

@@ -97,3 +97,21 @@ def test_message_dto_reply_to_and_system_note_contract(client, auth):
     msg = r.json()
     assert msg["replyTo"] == {"author": "", "text": "orig"}
     assert msg["who"] == "human_agent"
+
+
+def test_delete_ticket(client, auth):
+    r = client.post("/api/tickets", headers=auth("owner"),
+                    json={"subject": "Delete me", "cust": "Test Customer", "email": "delete@example.com", "text": "Hello"})
+    assert r.status_code == 200, r.text
+    tid = r.json()["id"]
+
+    r2 = client.post(f"/api/tickets/{tid}/messages", headers=auth("owner"),
+                     json={"body": "Internal message", "sender_type": "system"})
+    assert r2.status_code == 200, r2.text
+
+    del_res = client.delete(f"/api/tickets/{tid}", headers=auth("owner"))
+    assert del_res.status_code == 200, del_res.text
+    assert del_res.json()["ok"] is True
+
+    get_res = client.get(f"/api/tickets/{tid}", headers=auth("owner"))
+    assert get_res.status_code == 404

@@ -176,8 +176,8 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
                        detail=f"Customer message: “{text[:120]}”")
                 db.commit()
                 db.refresh(msg)
-                publish_event("message_created", {"ticket_id": ticket.id, "message_id": msg.id, "who": "customer", "text": text, "attachments": attachments})
-                publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+                publish_event("message_created", {"ticket_id": ticket.id, "message_id": msg.id, "who": "customer", "text": text, "attachments": attachments}, tenant_id=tenant.id)
+                publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
 
                 # Check escalation rules / human ownership
                 fired = escalation.evaluate(db, tenant, ticket, text)
@@ -188,7 +188,7 @@ async def ws_chat(websocket: WebSocket, ticket_id: str, token: str | None = None
                         "who": "system",
                         "text": "Thanks for waiting — one of our support team will reply shortly."
                     }))
-                    publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
+                    publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
                     continue
 
                 # Stream real AI response from LangGraph agent

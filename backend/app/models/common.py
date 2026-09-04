@@ -42,6 +42,10 @@ class KnowledgeType(str, Enum):
     PDF = "pdf"
     LINK = "link"
     RAW_TEXT = "raw_text"
+    MARKDOWN = "markdown"
+    DOCX = "docx"
+    CSV = "csv"
+    FILE = "file"
 
 
 class TenantStatus(str, Enum):

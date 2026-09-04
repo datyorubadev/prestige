@@ -73,8 +73,8 @@ def _normalise_lookup(value: str) -> str:
 @router.post("/kyc/upload")
 def upload_kyc_data(
     file: UploadFile = File(...),
-    name: str = Query(..., description="Friendly name for this data source"),
-    lookup_key: str = Query("email", description="Column name to use as lookup key"),
+    name: str | None = Query(None, description="Friendly name for this data source"),
+    lookup_key: str | None = Query(None, description="Column name to use as lookup key"),
     db: Db = None,
     tenant: Tenant = Depends(get_tenant),
     user: User = Depends(get_current_user),
@@ -91,24 +91,54 @@ def upload_kyc_data(
     headers, rows = _parse_uploaded_file(file_bytes, file.filename)
     if not rows:
         raise HTTPException(status_code=400, detail="File contains no data rows")
-    if lookup_key not in headers:
-        raise HTTPException(status_code=400, detail=f"Lookup key '{lookup_key}' not found in columns: {headers}")
+
+    header_map = {h.lower(): h for h in headers}
+
+    # Resolve friendly name if omitted
+    if not name or not name.strip():
+        raw_name = re.sub(r'\.[^.]+$', '', file.filename)
+        clean_name = re.sub(r'[-_]+', ' ', raw_name).strip()
+        ds_name = clean_name.title() if clean_name else "Customer Dataset"
+    else:
+        ds_name = name.strip()
+
+    # Resolve lookup key: prioritize user choice, then common identifiers, then first column
+    resolved_key = None
+    if lookup_key and lookup_key.strip():
+        user_choice = lookup_key.strip().lower()
+        if user_choice in header_map:
+            resolved_key = header_map[user_choice]
+
+    if not resolved_key:
+        candidates = [
+            "account_number", "account", "account_no",
+            "email", "e_mail", "email_address",
+            "phone_number", "phone", "mobile", "telephone",
+            "bvn", "nin", "customer_id", "id"
+        ]
+        for cand in candidates:
+            if cand in header_map:
+                resolved_key = header_map[cand]
+                break
+
+    if not resolved_key:
+        resolved_key = headers[0] if headers else "email"
 
     # Create data source
     ds = KYCDataSource(
         tenant_id=tenant.id,
-        name=name,
+        name=ds_name,
         filename=file.filename,
         row_count=len(rows),
         columns=json.dumps(headers),
-        lookup_key=lookup_key,
+        lookup_key=resolved_key,
     )
     db.add(ds)
     db.flush()
 
     # Bulk-insert records
     for row in rows:
-        lookup_val = _normalise_lookup(str(row.get(lookup_key, "")))
+        lookup_val = _normalise_lookup(str(row.get(resolved_key, "")))
         if not lookup_val:
             continue
         rec = KYCRecord(
@@ -126,7 +156,7 @@ def upload_kyc_data(
         "filename": ds.filename,
         "rowCount": ds.row_count,
         "columns": headers,
-        "lookupKey": lookup_key,
+        "lookupKey": resolved_key,
         "createdAt": ds.created_at.isoformat() if ds.created_at else None,
     }
 
@@ -191,6 +221,64 @@ def list_kyc_records(
         "total": total,
         "page": page,
         "pageSize": pageSize,
+    }
+
+
+class UpdateKYCDataSourceRequest(BaseModel):
+    name: str | None = None
+    lookupKey: str | None = None
+
+
+@router.delete("/kyc/datasources/{ds_id}")
+def delete_kyc_datasource(
+    ds_id: str,
+    db: Db = None,
+    tenant: Tenant = Depends(get_tenant),
+    user: User = Depends(get_current_user),
+):
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
+    ds = db.get(KYCDataSource, ds_id)
+    if not ds or ds.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Data source not found")
+    db.delete(ds)
+    db.commit()
+    return {"ok": True, "id": ds_id}
+
+
+@router.patch("/kyc/datasources/{ds_id}")
+def update_kyc_datasource(
+    ds_id: str,
+    body: UpdateKYCDataSourceRequest,
+    db: Db = None,
+    tenant: Tenant = Depends(get_tenant),
+    user: User = Depends(get_current_user),
+):
+    if not has_perm(user, AI_CONFIGURE):
+        raise InsufficientPrivileges()
+    ds = db.get(KYCDataSource, ds_id)
+    if not ds or ds.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Data source not found")
+
+    if body.name is not None and body.name.strip():
+        ds.name = body.name.strip()
+
+    if body.lookupKey is not None and body.lookupKey.strip():
+        headers = json.loads(ds.columns) if ds.columns else []
+        header_map = {h.lower(): h for h in headers}
+        if body.lookupKey.lower() in header_map:
+            ds.lookup_key = header_map[body.lookupKey.lower()]
+            # Re-normalise records
+            for rec in ds.records:
+                data = json.loads(rec.data) if rec.data else {}
+                rec.lookup_value = _normalise_lookup(str(data.get(ds.lookup_key, "")))
+
+    db.commit()
+    return {
+        "id": ds.id,
+        "name": ds.name,
+        "lookupKey": ds.lookup_key,
+        "rowCount": ds.row_count,
     }
 
 

@@ -124,15 +124,14 @@ def ingest_pdf(file: UploadFile = File(...), db: Db = None,
         raise ResourceQuotaExceeded("File exceeds the 25 MB upload cap")
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
-    from app.services.ingestion import parse_document_to_chunks
+    from app.services.ingestion import extract_document_text_and_type
 
     name = file.filename or "document.pdf"
-    chunks = parse_document_to_chunks(data, name)
-    text = " ".join(chunks)
+    text, source_type = extract_document_text_and_type(data, name)
     if not text.strip():
         raise HTTPException(status_code=400, detail="Document contained no extractable text")
     _enforce_quota(tenant, len(data))
-    source = _commit_source(db, tenant, KnowledgeType.PDF, name, text, None, len(data))
+    source = _commit_source(db, tenant, source_type, name, text, None, len(data))
     return knowledge_source_dto(source)
 
 
@@ -143,7 +142,7 @@ def ingest_multiple_files(
     tenant: Tenant = Depends(get_tenant),
     user=Depends(require_perm(KB_MANAGE)),
 ) -> list[dict]:
-    from app.services.ingestion import parse_document_to_chunks
+    from app.services.ingestion import extract_document_text_and_type
 
     created_sources = []
     for file in files:
@@ -151,13 +150,12 @@ def ingest_multiple_files(
         if len(data) > MAX_PDF_BYTES or not data:
             continue
         name = file.filename or "document"
-        chunks = parse_document_to_chunks(data, name)
-        text = " ".join(chunks)
+        text, source_type = extract_document_text_and_type(data, name)
         if not text.strip():
             continue
         try:
             _enforce_quota(tenant, len(data))
-            source = _commit_source(db, tenant, KnowledgeType.PDF, name, text, None, len(data))
+            source = _commit_source(db, tenant, source_type, name, text, None, len(data))
             created_sources.append(knowledge_source_dto(source))
         except Exception:
             continue

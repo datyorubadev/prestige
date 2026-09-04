@@ -519,16 +519,16 @@ export function WidgetChat({
   const send = useCallback(
     async (raw: string, attachments?: WidgetAttachment[]) => {
       const text = raw.trim();
-      if ((!text && !attachments?.length) || (handoff && ws.connected)) return;
+      if (!text && !attachments?.length) return;
+
+      // The customer's message always appears immediately.
+      setMsgs((m) => [...m, { who: "customer", text, attachments }]);
+
       if (handoff && ws.connected) {
         ws.send(text, attachments);
         return;
       }
 
-      // The customer's message always appears immediately. If the AI is still
-      // composing, the message is queued and answered together with any other
-      // rapid follow-ups in one batched turn — nothing gets dropped.
-      setMsgs((m) => [...m, { who: "customer", text, attachments }]);
       if (busyRef.current) {
         pendingRef.current.push({ text, attachments });
         return;
@@ -549,24 +549,28 @@ export function WidgetChat({
         aiRepliesRef.current = 0;
         setCsat("hidden");
 
-        if (res.escalated && presence === "online") {
-          setAgentName(res.ticket.assignee ?? "Support team");
-          setMsgs(ticketMsgs(res.ticket));
+        const isEscalated = Boolean(res.escalated || handoff || res.ticket?.status === "escalated");
+
+        if (isEscalated && presence === "online") {
+          setAgentName(res.ticket?.assignee ?? "Support team");
           setHandoff(true);
           setTyping(false);
           return;
         }
 
-        if (res.escalated) {
+        if (isEscalated) {
           // Offline/away: never hand a customer to a "connecting" fake — tell
           // the truth and route the request to email instead.
-          setMsgs((m) => [
-            ...m,
-            {
-              who: "ai",
-              text: `The ${tenant.name} team is offline right now. I've saved your message — we'll reply to ${identity.email} by email as soon as someone's back.`,
-            },
-          ]);
+          if (!handoff) {
+            setMsgs((m) => [
+              ...m,
+              {
+                who: "ai",
+                text: `The ${tenant.name} team is offline right now. I've saved your message — we'll reply to ${identity.email} by email as soon as someone's back.`,
+              },
+            ]);
+          }
+          setHandoff(true);
           setTyping(false);
           return;
         }
@@ -683,8 +687,13 @@ export function WidgetChat({
       const rawWho = t.who as string;
       // Transcript mirrors the chat socket (agent + AI replies). System rows
       // (escalation/join notes) are private to staff and never customer-facing.
-      if (rawWho === "system" || rawWho === "customer") continue;
-      const who: WidgetMsg["who"] = rawWho === "ai" || rawWho === "ai_bot" ? "ai" : "agent";
+      if (rawWho === "system") continue;
+      const who: WidgetMsg["who"] =
+        rawWho === "customer"
+          ? "customer"
+          : rawWho === "ai" || rawWho === "ai_bot"
+            ? "ai"
+            : "agent";
       if (!combined.some((c) => c.text === t.text && c.who === who)) {
         combined.push({ who, text: t.text, attachments: t.attachments });
       }

@@ -454,11 +454,22 @@ const DEFAULT_INDUSTRY_TEMPLATES: IndustryTemplate[] = [
   },
 ];
 
+export interface KYCDataSourceItem {
+  id: string;
+  name: string;
+  filename: string;
+  rowCount: number;
+  columns: string[];
+  lookupKey: string;
+  createdAt?: string;
+}
+
 export function AiToolsTab() {
   const toast = useToast();
   const [tools, setTools] = useState<TenantCustomTool[]>([]);
   const [templates, setTemplates] = useState<IndustryTemplate[]>(DEFAULT_INDUSTRY_TEMPLATES);
   const [loading, setLoading] = useState(true);
+  const [mainTab, setMainTab] = useState<"tools" | "datasets">("tools");
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [templateCategory, setTemplateCategory] = useState<string>("all");
   const [templateSearch, setTemplateSearch] = useState("");
@@ -489,15 +500,29 @@ export function AiToolsTab() {
   const [formConfig, setFormConfig] = useState<Record<string, unknown>>({});
 
   // KYC-specific state
-  const [kycDataSources, setKycDataSources] = useState<Array<{ id: string; name: string; rowCount: number; columns: string[] }>>([]);
-  const [kycQuizFields, setKycQuizFields] = useState<string[]>(["full_name", "date_of_birth", "phone"]);
-  const [kycProtectedFields, setKycProtectedFields] = useState<string[]>(["account_number", "balance"]);
+  const [kycDataSources, setKycDataSources] = useState<KYCDataSourceItem[]>([]);
+  const [kycQuizFields, setKycQuizFields] = useState<string[]>(["full_name", "date_of_birth", "phone_number"]);
+  const [kycProtectedFields, setKycProtectedFields] = useState<string[]>(["balance", "account_type"]);
   const [kycPassingScore, setKycPassingScore] = useState(60);
   const [kycReferralMessage, setKycReferralMessage] = useState("I'll need to refer you to our office for verification.");
   const [kycUploadFile, setKycUploadFile] = useState<File | null>(null);
   const [kycUploadName, setKycUploadName] = useState("");
-  const [kycUploadLookupKey, setKycUploadLookupKey] = useState("email");
+  const [kycUploadLookupKey, setKycUploadLookupKey] = useState("account_number");
   const [kycUploading, setKycUploading] = useState(false);
+  const [detectedColumns, setDetectedColumns] = useState<string[]>([]);
+  const [detectedRowCount, setDetectedRowCount] = useState<number>(0);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Dataset Preview Modal state
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [previewDataSource, setPreviewDataSource] = useState<KYCDataSourceItem | null>(null);
+  const [previewRecords, setPreviewRecords] = useState<Array<{ id: string; lookupValue: string; data: Record<string, unknown> }>>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [previewTotal, setPreviewTotal] = useState(0);
+
+  // Standalone Upload Modal state
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   // Doc Verify-specific state
   const [docAcceptedTypes, setDocAcceptedTypes] = useState<string[]>(["national_id", "passport", "drivers_license"]);
@@ -568,13 +593,15 @@ export function AiToolsTab() {
     setFormRequiresApproval(false);
     setFormToolType("api");
     setFormConfig({});
-    setKycQuizFields(["full_name", "date_of_birth", "phone"]);
-    setKycProtectedFields(["account_number", "balance"]);
+    setKycQuizFields(["full_name", "date_of_birth", "phone_number"]);
+    setKycProtectedFields(["balance", "account_type"]);
     setKycPassingScore(60);
     setKycReferralMessage("I'll need to refer you to our office for verification.");
     setKycUploadFile(null);
     setKycUploadName("");
-    setKycUploadLookupKey("email");
+    setKycUploadLookupKey("account_number");
+    setDetectedColumns([]);
+    setDetectedRowCount(0);
     setDocAcceptedTypes(["national_id", "passport", "drivers_license"]);
     setDocMatchFields({ national_id: ["full_name", "date_of_birth"], passport: ["full_name", "nationality"], drivers_license: ["full_name", "date_of_birth"] });
     setDocVerificationMsg("Your identity has been verified successfully.");
@@ -627,8 +654,12 @@ export function AiToolsTab() {
     setFormConfig(cfg);
     // Load type-specific config from the config object
     if (tool.toolType === "kyc") {
-      setKycQuizFields((cfg as Record<string, unknown>).quizFields as string[] || ["full_name", "date_of_birth", "phone"]);
-      setKycProtectedFields((cfg as Record<string, unknown>).protectedFields as string[] || ["account_number", "balance"]);
+      setFormConfig({
+        dataSourceId: (cfg as Record<string, unknown>).dataSourceId,
+        lookupKey: (cfg as Record<string, unknown>).lookupKey,
+      });
+      setKycQuizFields((cfg as Record<string, unknown>).quizFields as string[] || ["full_name", "date_of_birth", "phone_number"]);
+      setKycProtectedFields((cfg as Record<string, unknown>).protectedFields as string[] || ["balance", "account_type"]);
       setKycPassingScore(((cfg as Record<string, unknown>).passingScore as number || 0.6) * 100);
       setKycReferralMessage((cfg as Record<string, unknown>).referralMessage as string || "");
     } else if (tool.toolType === "doc_verify") {
@@ -717,7 +748,16 @@ export function AiToolsTab() {
     // Build type-specific config
     let typeConfig: Record<string, unknown> = {};
     if (formToolType === "kyc") {
+      const dsId = (formConfig as Record<string, unknown>).dataSourceId as string | undefined;
+      if (!dsId) {
+        toast("Please link a customer dataset in Step 2 before saving", "danger");
+        setSaving(false);
+        return;
+      }
+      const linkedDs = kycDataSources.find((d) => d.id === dsId);
       typeConfig = {
+        dataSourceId: dsId,
+        lookupKey: (formConfig as Record<string, unknown>).lookupKey || linkedDs?.lookupKey || kycUploadLookupKey,
         quizFields: kycQuizFields,
         protectedFields: kycProtectedFields,
         passingScore: kycPassingScore / 100,
@@ -810,40 +850,135 @@ export function AiToolsTab() {
 
   const loadKycDataSources = useCallback(async () => {
     try {
-      const res = await api.get<{ dataSources: Array<{ id: string; name: string; rowCount: number; columns: string[] }> }>("/verification/kyc/datasources");
+      const res = await api.get<{ dataSources: KYCDataSourceItem[] }>("/verification/kyc/datasources");
       setKycDataSources(res?.dataSources || []);
     } catch { /* graceful */ }
   }, []);
 
   useEffect(() => {
-    if (builderOpen && formToolType === "kyc") {
-      void loadKycDataSources();
+    void loadKycDataSources();
+  }, [loadKycDataSources]);
+
+  const handleFileSelect = (file: File) => {
+    setKycUploadFile(file);
+    const cleanName = file.name
+      .replace(/\.[^/.]+$/, "")
+      .replace(/[-_]+/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+    if (!kycUploadName.trim()) {
+      setKycUploadName(cleanName);
     }
-  }, [builderOpen, formToolType, loadKycDataSources]);
+    if (file.name.toLowerCase().endsWith(".csv")) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = (e.target?.result as string) || "";
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        if (lines.length > 0) {
+          const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
+          setDetectedColumns(headers);
+          setDetectedRowCount(Math.max(0, lines.length - 1));
+          const candidates = ["account_number", "email", "phone_number", "phone", "bvn", "nin"];
+          const matched = candidates.find((c) => headers.map((h) => h.toLowerCase()).includes(c));
+          if (matched) {
+            const actual = headers.find((h) => h.toLowerCase() === matched);
+            if (actual) setKycUploadLookupKey(actual);
+          } else if (headers.length > 0) {
+            setKycUploadLookupKey(headers[0]);
+          }
+        }
+      };
+      reader.readAsText(file.slice(0, 8192));
+    }
+  };
 
   const uploadKycFile = async () => {
-    if (!kycUploadFile || !kycUploadName.trim()) {
-      toast("Please select a file and enter a name", "danger");
+    if (!kycUploadFile) {
+      toast("Please choose a CSV or Excel file", "danger");
       return;
     }
     setKycUploading(true);
     try {
       const fd = new FormData();
       fd.append("file", kycUploadFile);
-      const res = await api.post<{ id: string; name: string; rowCount: number; columns: string[] }>(
-        `/verification/kyc/upload?name=${encodeURIComponent(kycUploadName)}&lookup_key=${encodeURIComponent(kycUploadLookupKey)}`,
+      const params = new URLSearchParams();
+      if (kycUploadName.trim()) params.set("name", kycUploadName.trim());
+      if (kycUploadLookupKey.trim()) params.set("lookup_key", kycUploadLookupKey.trim());
+      const res = await api.post<KYCDataSourceItem>(
+        `/verification/kyc/upload?${params.toString()}`,
         fd,
       );
-      setKycDataSources((prev) => [res, ...prev]);
-      setFormConfig((prev) => ({ ...prev, dataSourceId: res.id }));
+      setKycDataSources((prev) => [res, ...prev.filter((d) => d.id !== res.id)]);
+      setFormConfig((prev) => ({ ...prev, dataSourceId: res.id, lookupKey: res.lookupKey }));
       setKycUploadFile(null);
       setKycUploadName("");
-      toast(`Uploaded ${res.rowCount} records from "${res.name}"`);
+      setDetectedColumns([]);
+      setDetectedRowCount(0);
+      setUploadModalOpen(false);
+      toast(`Uploaded ${res.rowCount} records from "${res.name}" successfully!`);
     } catch (err) {
       toast(err instanceof Error ? err.message : "Upload failed", "danger");
     } finally {
       setKycUploading(false);
     }
+  };
+
+  const deleteKycDataSource = async (dsId: string, dsName: string) => {
+    if (!window.confirm(`Delete dataset "${dsName}"?`)) return;
+    try {
+      await api.delete(`/verification/kyc/datasources/${dsId}`);
+      setKycDataSources((prev) => prev.filter((d) => d.id !== dsId));
+      if ((formConfig as Record<string, unknown>).dataSourceId === dsId) {
+        setFormConfig((prev) => {
+          const next = { ...prev };
+          delete next.dataSourceId;
+          return next;
+        });
+      }
+      toast(`Dataset "${dsName}" deleted`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Failed to delete dataset", "danger");
+    }
+  };
+
+  const loadPreviewRecords = async (dsId: string, page = 1) => {
+    setPreviewLoading(true);
+    try {
+      const res = await api.get<{
+        records: Array<{ id: string; lookupValue: string; data: Record<string, unknown> }>;
+        total: number;
+        page: number;
+      }>(`/verification/kyc/datasources/${dsId}/records?pageSize=20&page=${page}`);
+      setPreviewRecords(res?.records || []);
+      setPreviewTotal(res?.total || 0);
+      setPreviewPage(res?.page || 1);
+    } catch {
+      toast("Could not load preview records", "danger");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const openPreviewModal = (ds: KYCDataSourceItem) => {
+    setPreviewDataSource(ds);
+    setPreviewModalOpen(true);
+    void loadPreviewRecords(ds.id, 1);
+  };
+
+  const createToolFromDataSource = (ds: KYCDataSourceItem) => {
+    openNewTool();
+    setFormToolType("kyc");
+    setFormDisplayName(`${ds.name} Verification`);
+    setFormName(`kyc_${ds.name.toLowerCase().replace(/[^a-z0-9_]+/g, "_")}`);
+    setFormDescription(`Verify customer identity against ${ds.name} (${ds.rowCount} records) before revealing protected account details or performing sensitive actions.`);
+    setFormConfig({ dataSourceId: ds.id, lookupKey: ds.lookupKey });
+    const cols = ds.columns || [];
+    const quizCandidates = ["full_name", "date_of_birth", "phone_number", "mother_maiden_name", "state_of_origin", "address"];
+    const protectedCandidates = ["balance", "account_type", "bvn_status", "kyc_tier", "bvn", "nin"];
+    const matchedQuiz = cols.filter((c) => quizCandidates.includes(c.toLowerCase()));
+    const matchedProtected = cols.filter((c) => protectedCandidates.includes(c.toLowerCase()));
+    if (matchedQuiz.length) setKycQuizFields(matchedQuiz);
+    if (matchedProtected.length) setKycProtectedFields(matchedProtected);
+    setWizardStep(2);
   };
 
   const TOOL_TYPE_OPTIONS = [
@@ -893,16 +1028,63 @@ export function AiToolsTab() {
             Connect REST APIs, verify customer identity (KYC), validate documents, or schedule callbacks — all powered by your AI assistant.
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setUploadModalOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-emerald-600/30 bg-emerald-500/10 dark:bg-emerald-500/15 dark:border-emerald-500/30 px-3.5 py-2 text-[12.5px] font-semibold text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/20 dark:hover:bg-emerald-500/25 transition-colors duration-150 shadow-xs"
+          >
+            <Icon name="upload" size={15} className="shrink-0" />
+            Upload Customer Data
+          </button>
+          <button
+            type="button"
+            onClick={openNewTool}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-[12.5px] font-semibold text-white transition-colors duration-150 hover:bg-primary-dark shadow-sm"
+          >
+            <Icon name="plus" size={15} />
+            Create New Tool
+          </button>
+        </div>
+      </div>
+
+      {/* Primary View Switcher Tabs */}
+      <div className="flex items-center gap-2 border-b border-border pb-3">
         <button
           type="button"
-          onClick={openNewTool}
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-[12.5px] font-semibold text-white transition-colors duration-150 hover:bg-primary-dark shadow-sm"
+          onClick={() => setMainTab("tools")}
+          className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] font-semibold transition-all ${
+            mainTab === "tools"
+              ? "bg-primary text-white shadow-xs"
+              : "bg-surface-2 text-text-2 hover:bg-surface-3 hover:text-text border border-border"
+          }`}
         >
-          <Icon name="plus" size={15} />
-          Create New Tool
+          <Icon name="sparkles" size={15} />
+          <span>AI Actions & Tools</span>
+          <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${mainTab === "tools" ? "bg-white/20 text-white" : "bg-surface-3 text-text-3"}`}>
+            {tools.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMainTab("datasets")}
+          className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] font-semibold transition-all ${
+            mainTab === "datasets"
+              ? "bg-emerald-600 text-white shadow-xs"
+              : "bg-surface-2 text-text-2 hover:bg-surface-3 hover:text-text border border-border"
+          }`}
+        >
+          <Icon name="shield" size={15} />
+          <span>KYC Customer Datasets</span>
+          <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${mainTab === "datasets" ? "bg-white/20 text-white" : "bg-surface-3 text-text-3"}`}>
+            {kycDataSources.length}
+          </span>
         </button>
       </div>
 
+      {mainTab === "tools" && (
+        <>
       {/* Preconfigured Industry Templates 1-Click Install Gallery */}
       <Card title="Industry Action Templates (1-Click Install)" icon="sparkles">
         <div className="flex flex-col gap-4">
@@ -1196,8 +1378,254 @@ export function AiToolsTab() {
           </div>
         )}
       </Card>
+        </>
+      )}
 
-      {/* Visual Action Builder Modal with Stepper */}
+      {mainTab === "datasets" && (
+        <div className="flex flex-col gap-6">
+          {/* Upload Customer Data Card */}
+          <Card title="Upload Customer Verification Dataset" icon="upload">
+            <div className="flex flex-col gap-4">
+              <p className="text-[12.5px] text-text-3">
+                Upload customer records (CSV or Excel) to verify customer identities during support conversations. The AI quizzes customers on selected fields (e.g. Date of Birth, Mother&apos;s Maiden Name) and grants access to protected fields upon passing.
+              </p>
+
+              {/* Drag and Drop Upload Area */}
+              <div
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) handleFileSelect(f);
+                }}
+                className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center transition-all ${
+                  isDragging
+                    ? "border-emerald-500 bg-emerald-500/10 ring-4 ring-emerald-500/20"
+                    : "border-border bg-surface hover:border-emerald-500/50 hover:bg-surface-2"
+                }`}
+              >
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  id="mainKycFileInput"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleFileSelect(f);
+                  }}
+                />
+
+                {!kycUploadFile ? (
+                  <label htmlFor="mainKycFileInput" className="cursor-pointer flex flex-col items-center gap-2 py-4">
+                    <span className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
+                      <Icon name="upload" size={22} />
+                    </span>
+                    <p className="text-[13.5px] font-bold text-text">
+                      Click to choose or drag &amp; drop customer CSV / Excel file
+                    </p>
+                    <p className="text-[12px] text-text-3 max-w-md">
+                      Supports <code className="text-primary font-mono font-semibold">kyc_verification_test_data.csv</code> with account numbers, phone numbers, BVNs, and protected balances.
+                    </p>
+                  </label>
+                ) : (
+                  <div className="w-full max-w-2xl flex flex-col gap-4">
+                    <div className="flex items-center justify-between rounded-xl bg-surface-2 border border-border p-3.5">
+                      <div className="flex items-center gap-3">
+                        <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-600">
+                          <Icon name="file" size={20} />
+                        </span>
+                        <div className="text-left">
+                          <p className="text-[13px] font-bold text-text">{kycUploadFile.name}</p>
+                          <p className="text-[11.5px] text-text-3">
+                            {(kycUploadFile.size / 1024).toFixed(1)} KB
+                            {detectedRowCount > 0 && ` · ~${detectedRowCount} records`}
+                            {detectedColumns.length > 0 && ` · ${detectedColumns.length} columns`}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setKycUploadFile(null);
+                          setDetectedColumns([]);
+                          setDetectedRowCount(0);
+                        }}
+                        className="text-text-3 hover:text-danger p-1.5 rounded-md hover:bg-danger/10 transition-colors"
+                      >
+                        <Icon name="close" size={16} />
+                      </button>
+                    </div>
+
+                    {/* Detected columns pills preview */}
+                    {detectedColumns.length > 0 && (
+                      <div className="text-left">
+                        <span className="text-[11.5px] font-semibold text-text-3">Detected Columns ({detectedColumns.length}):</span>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                          {detectedColumns.map((c) => (
+                            <span key={c} className="rounded-md bg-surface-3 px-2 py-0.5 text-[11px] font-mono text-text-2 border border-border/60">
+                              {c}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 text-left">
+                      <div>
+                        <label className="text-[11.5px] font-semibold text-text-3">Dataset Friendly Name</label>
+                        <input
+                          value={kycUploadName}
+                          onChange={(e) => setKycUploadName(e.target.value)}
+                          placeholder="e.g. Bank Customers Sep 2026"
+                          className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3.5 py-2 text-[12.5px] text-text focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11.5px] font-semibold text-text-3">Primary Lookup Key Column</label>
+                        {detectedColumns.length > 0 ? (
+                          <div className="mt-1.5">
+                            <Select
+                              value={kycUploadLookupKey}
+                              onChange={setKycUploadLookupKey}
+                              options={detectedColumns.map((c) => ({
+                                value: c,
+                                label: ["account_number", "email", "phone_number", "phone"].includes(c.toLowerCase())
+                                  ? `${c} (Recommended Identifier)`
+                                  : c,
+                              }))}
+                              className="w-full"
+                            />
+                          </div>
+                        ) : (
+                          <input
+                            value={kycUploadLookupKey}
+                            onChange={(e) => setKycUploadLookupKey(e.target.value)}
+                            placeholder="e.g. account_number, email"
+                            className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3.5 py-2 text-[12.5px] text-text focus:border-emerald-500 focus:outline-none"
+                          />
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setKycUploadFile(null);
+                          setDetectedColumns([]);
+                          setDetectedRowCount(0);
+                        }}
+                        className="rounded-lg border border-border bg-surface px-4 py-2 text-[12.5px] font-semibold text-text-2 hover:bg-surface-2 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={kycUploading}
+                        onClick={uploadKycFile}
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-[12.5px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-sm"
+                      >
+                        {kycUploading ? <Spinner size={15} /> : <Icon name="upload" size={15} />}
+                        Upload Customer Dataset
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          {/* Uploaded Datasets List */}
+          <Card title="Available Customer Datasets" icon="shield">
+            {kycDataSources.length === 0 ? (
+              <div className="flex flex-col items-center justify-center p-12 text-center">
+                <span className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
+                  <Icon name="shield" size={28} />
+                </span>
+                <p className="mt-3 text-[14px] font-bold text-text">No KYC datasets uploaded yet</p>
+                <p className="mt-1 max-w-md text-[12px] text-text-3">
+                  Upload <code className="text-primary font-mono">kyc_verification_test_data.csv</code> above to test customer identity verification and protected balance reveal.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3.5">
+                {kycDataSources.map((ds) => (
+                  <div
+                    key={ds.id}
+                    className="flex flex-col md:flex-row md:items-center justify-between gap-4 rounded-xl border border-border bg-surface p-4 transition-all hover:border-emerald-500/40 hover:shadow-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 shrink-0">
+                          <Icon name="shield" size={16} />
+                        </span>
+                        <h4 className="text-[13.5px] font-bold text-text truncate">{ds.name}</h4>
+                        <span className="rounded-md bg-emerald-500/15 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-bold text-emerald-700">
+                          {ds.rowCount} Customers
+                        </span>
+                        <span className="rounded-md bg-primary/10 border border-primary/20 px-2 py-0.5 text-[11px] font-mono text-primary font-bold">
+                          Lookup: {ds.lookupKey}
+                        </span>
+                        {ds.filename && (
+                          <span className="text-[11px] text-text-3 font-mono truncate max-w-[180px]" title={ds.filename}>
+                            ({ds.filename})
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Columns tags */}
+                      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[11px] font-semibold text-text-3">Columns ({ds.columns.length}):</span>
+                        {ds.columns.map((col) => (
+                          <span
+                            key={col}
+                            className={`rounded px-1.5 py-0.2 text-[10.5px] font-mono border ${
+                              col === ds.lookupKey
+                                ? "bg-primary/15 border-primary/30 text-primary font-bold"
+                                : "bg-surface-2 border-border text-text-3"
+                            }`}
+                          >
+                            {col}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 border-t md:border-t-0 pt-3 md:pt-0 border-border/60">
+                      <button
+                        type="button"
+                        onClick={() => openPreviewModal(ds)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text hover:bg-surface-2 transition-colors shadow-xs"
+                      >
+                        <Icon name="search" size={13} className="text-text-3" />
+                        Preview Records
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => createToolFromDataSource(ds)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-700 transition-colors shadow-xs"
+                      >
+                        <Icon name="plus" size={13} />
+                        Create KYC Tool
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteKycDataSource(ds.id, ds.name)}
+                        title="Delete Dataset"
+                        className="p-1.5 rounded-lg text-text-3 hover:text-danger hover:bg-danger/10 transition-colors"
+                      >
+                        <Icon name="trash" size={15} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
       <Modal
         open={builderOpen}
         onClose={() => setBuilderOpen(false)}
@@ -1465,84 +1893,206 @@ export function AiToolsTab() {
                     </p>
                   </div>
 
-                  {/* Upload new data source */}
-                  <div className="rounded-xl border border-border bg-surface-2 p-4">
-                    <p className="text-[12.5px] font-bold text-text mb-3">Upload Customer Data</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[11px] font-semibold text-text-3">Data Source Name</label>
-                        <input
-                          value={kycUploadName}
-                          onChange={(e) => setKycUploadName(e.target.value)}
-                          placeholder="e.g. Customer Registry Aug 2026"
-                          className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-primary focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[11px] font-semibold text-text-3">Lookup Key Column</label>
-                        <input
-                          value={kycUploadLookupKey}
-                          onChange={(e) => setKycUploadLookupKey(e.target.value)}
-                          placeholder="e.g. email, phone, account_number"
-                          className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-primary focus:outline-none"
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-3 flex items-center gap-3">
-                      <label className="inline-flex items-center gap-2 rounded-lg border border-dashed border-border bg-surface px-4 py-2 text-[12px] font-semibold text-text-2 hover:border-primary/50 hover:text-primary cursor-pointer transition-colors">
-                        <Icon name="upload" size={14} />
-                        {kycUploadFile ? kycUploadFile.name : "Choose CSV / Excel file"}
-                        <input
-                          type="file"
-                          accept=".csv,.xlsx,.xls"
-                          className="hidden"
-                          onChange={(e) => setKycUploadFile(e.target.files?.[0] || null)}
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        disabled={kycUploading || !kycUploadFile || !kycUploadName.trim()}
-                        onClick={uploadKycFile}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-[12px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-                      >
-                        {kycUploading ? <Spinner size={13} /> : <Icon name="upload" size={13} />}
-                        Upload
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Existing data sources */}
+                  {/* Existing data sources selection */}
                   <div>
-                    <label className="text-[12px] font-semibold text-text">Linked Data Source</label>
-                    <p className="text-[11px] text-text-3 mb-2">Select which uploaded dataset this KYC tool should verify against.</p>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-[12px] font-semibold text-text">Select Linked Customer Dataset</label>
+                      <span className="text-[11px] text-text-3">{kycDataSources.length} dataset{kycDataSources.length === 1 ? "" : "s"} available</span>
+                    </div>
                     {kycDataSources.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-border p-4 text-center text-[12px] text-text-3">
-                        No data sources uploaded yet. Upload a file above first.
+                      <div className="rounded-xl border border-dashed border-border bg-surface-2/40 p-4 text-center text-[12px] text-text-3">
+                        No customer datasets uploaded yet. Upload your CSV or Excel file below to get started.
                       </div>
                     ) : (
-                      <div className="flex flex-col gap-2">
-                        {kycDataSources.map((ds) => (
-                          <button
-                            key={ds.id}
-                            type="button"
-                            onClick={() => setFormConfig((prev) => ({ ...prev, dataSourceId: ds.id }))}
-                            className={`flex items-center justify-between rounded-xl border-2 p-3 text-left transition-all ${
-                              (formConfig as Record<string, unknown>).dataSourceId === ds.id
-                                ? "border-emerald-500 bg-emerald-500/5"
-                                : "border-border bg-surface hover:border-border/80"
-                            }`}
-                          >
-                            <div>
-                              <p className="text-[12.5px] font-bold text-text">{ds.name}</p>
-                              <p className="text-[11px] text-text-3">{ds.rowCount} records &middot; Columns: {ds.columns.join(", ")}</p>
+                      <div className="flex flex-col gap-2.5 max-h-56 overflow-y-auto pr-1">
+                        {kycDataSources.map((ds) => {
+                          const isSelected = (formConfig as Record<string, unknown>).dataSourceId === ds.id;
+                          return (
+                            <div
+                              key={ds.id}
+                              onClick={() => setFormConfig((prev) => ({ ...prev, dataSourceId: ds.id, lookupKey: ds.lookupKey }))}
+                              className={`flex items-center justify-between rounded-xl border-2 p-3.5 text-left transition-all cursor-pointer ${
+                                isSelected
+                                  ? "border-emerald-500 bg-emerald-500/10 shadow-xs ring-1 ring-emerald-500/20"
+                                  : "border-border bg-surface hover:border-emerald-500/40 hover:bg-surface-2"
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1 pr-3">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-[13px] font-bold text-text truncate">{ds.name}</p>
+                                  <span className="rounded-md bg-emerald-500/15 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+                                    {ds.rowCount} records
+                                  </span>
+                                  <span className="rounded-md bg-surface-3 px-2 py-0.5 text-[10.5px] font-mono text-text-3">
+                                    Key: {ds.lookupKey}
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-[11px] text-text-3 truncate">
+                                  Columns: {ds.columns.slice(0, 7).join(", ")}{ds.columns.length > 7 ? ` +${ds.columns.length - 7} more` : ""}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openPreviewModal(ds);
+                                  }}
+                                  className="text-[11px] font-semibold text-text-2 hover:text-primary bg-surface-2 hover:bg-surface-3 border border-border px-2.5 py-1 rounded-md transition-colors inline-flex items-center gap-1"
+                                >
+                                  <Icon name="search" size={11} />
+                                  Preview
+                                </button>
+                                <div className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                  isSelected ? "border-emerald-500 bg-emerald-600 text-white" : "border-border bg-surface"
+                                }`}>
+                                  {isSelected && <Icon name="check" size={12} />}
+                                </div>
+                              </div>
                             </div>
-                            {(formConfig as Record<string, unknown>).dataSourceId === ds.id && (
-                              <Icon name="check" size={16} className="text-emerald-600" />
-                            )}
-                          </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
+                  </div>
+
+                  {/* Upload new data source card */}
+                  <div className="rounded-xl border border-border bg-surface-2 p-4">
+                    <p className="text-[12.5px] font-bold text-text mb-2">Upload Customer Data File (CSV / Excel)</p>
+                    
+                    {/* Drag and Drop Zone */}
+                    <div
+                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setIsDragging(false);
+                        const f = e.dataTransfer.files?.[0];
+                        if (f) handleFileSelect(f);
+                      }}
+                      className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-4 text-center transition-all ${
+                        isDragging
+                          ? "border-emerald-500 bg-emerald-500/10 ring-2 ring-emerald-500/20"
+                          : "border-border bg-surface hover:border-emerald-500/50 hover:bg-surface-2"
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        id="builderKycFileInput"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleFileSelect(f);
+                        }}
+                      />
+                      
+                      {!kycUploadFile ? (
+                        <label htmlFor="builderKycFileInput" className="cursor-pointer flex flex-col items-center gap-1.5 py-2">
+                          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
+                            <Icon name="upload" size={18} />
+                          </span>
+                          <p className="text-[12.5px] font-semibold text-text">
+                            Click to browse or drag & drop customer CSV/Excel
+                          </p>
+                          <p className="text-[11px] text-text-3">
+                            Compatible with <code className="text-primary font-mono">kyc_verification_test_data.csv</code> and standard customer records
+                          </p>
+                        </label>
+                      ) : (
+                        <div className="w-full flex flex-col gap-3">
+                          <div className="flex items-center justify-between rounded-lg bg-surface-2 border border-border p-2.5">
+                            <div className="flex items-center gap-2">
+                              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-600">
+                                <Icon name="file" size={15} />
+                              </span>
+                              <div className="text-left">
+                                <p className="text-[12px] font-bold text-text">{kycUploadFile.name}</p>
+                                <p className="text-[10.5px] text-text-3">
+                                  {(kycUploadFile.size / 1024).toFixed(1)} KB
+                                  {detectedRowCount > 0 && ` · ~${detectedRowCount} records`}
+                                  {detectedColumns.length > 0 && ` · ${detectedColumns.length} columns`}
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setKycUploadFile(null);
+                                setDetectedColumns([]);
+                                setDetectedRowCount(0);
+                              }}
+                              className="text-text-3 hover:text-danger p-1 rounded transition-colors"
+                            >
+                              <Icon name="close" size={14} />
+                            </button>
+                          </div>
+
+                          {/* Pre-detected columns pills */}
+                          {detectedColumns.length > 0 && (
+                            <div className="text-left">
+                              <span className="text-[11px] font-semibold text-text-3">Detected Columns ({detectedColumns.length}):</span>
+                              <div className="mt-1 flex flex-wrap gap-1 max-h-16 overflow-y-auto">
+                                {detectedColumns.map((c) => (
+                                  <span key={c} className="rounded bg-surface-3 px-1.5 py-0.5 text-[10.5px] font-mono text-text-2 border border-border/50">
+                                    {c}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-2 gap-3 text-left">
+                            <div>
+                              <label className="text-[11px] font-semibold text-text-3">Dataset Name</label>
+                              <input
+                                value={kycUploadName}
+                                onChange={(e) => setKycUploadName(e.target.value)}
+                                placeholder="e.g. Customer Registry Aug 2026"
+                                className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-emerald-500 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[11px] font-semibold text-text-3">Primary Lookup Key</label>
+                              {detectedColumns.length > 0 ? (
+                                <div className="mt-1">
+                                  <Select
+                                    value={kycUploadLookupKey}
+                                    onChange={setKycUploadLookupKey}
+                                    options={detectedColumns.map((c) => ({
+                                      value: c,
+                                      label: ["account_number", "email", "phone_number", "phone"].includes(c.toLowerCase())
+                                        ? `${c} (Recommended)`
+                                        : c,
+                                    }))}
+                                    className="w-full"
+                                  />
+                                </div>
+                              ) : (
+                                <input
+                                  value={kycUploadLookupKey}
+                                  onChange={(e) => setKycUploadLookupKey(e.target.value)}
+                                  placeholder="e.g. account_number, email"
+                                  className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-emerald-500 focus:outline-none"
+                                />
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 pt-1">
+                            <button
+                              type="button"
+                              disabled={kycUploading}
+                              onClick={uploadKycFile}
+                              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-[12px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-xs"
+                            >
+                              {kycUploading ? <Spinner size={13} /> : <Icon name="upload" size={13} />}
+                              Upload & Select Dataset
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </>
               )}
@@ -1761,95 +2311,198 @@ export function AiToolsTab() {
               )}
 
               {/* ── KYC Quiz Configuration ── */}
-              {formToolType === "kyc" && (
-                <>
-                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3.5 flex items-start gap-2.5">
-                    <Icon name="shield" size={16} className="text-emerald-600 shrink-0 mt-0.5" />
-                    <p className="text-[12px] text-text-2 leading-relaxed">
-                      Configure which fields the AI will quiz customers on, which fields are protected (revealed after verification), and the passing score.
-                    </p>
-                  </div>
+              {formToolType === "kyc" && (() => {
+                const activeDs = kycDataSources.find((d) => d.id === (formConfig as Record<string, unknown>).dataSourceId);
+                const availableCols = activeDs?.columns || (detectedColumns.length ? detectedColumns : [
+                  "account_number", "email", "phone_number", "full_name", "date_of_birth", "bvn", "nin", "address", "state_of_origin", "mother_maiden_name", "balance", "account_type", "bvn_status", "kyc_tier"
+                ]);
+                const lookupCol = ((formConfig as Record<string, unknown>).lookupKey as string) || activeDs?.lookupKey || kycUploadLookupKey;
 
-                  <div>
-                    <label className="text-[12px] font-semibold text-text">Quiz Fields (customer must answer correctly)</label>
-                    <p className="text-[11px] text-text-3 mb-2">These fields are asked as verification questions. Must exist as columns in your uploaded data.</p>
-                    <div className="flex flex-wrap gap-2">
-                      {kycQuizFields.map((f) => (
-                        <span key={f} className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-[12px] font-semibold text-emerald-700">
-                          {f.replace(/_/g, " ")}
-                          <button type="button" onClick={() => setKycQuizFields((prev) => prev.filter((x) => x !== f))} className="text-emerald-400 hover:text-emerald-700">
-                            <Icon name="close" size={12} />
-                          </button>
-                        </span>
-                      ))}
-                      <input
-                        placeholder="Add field..."
-                        className="w-28 rounded-lg border border-dashed border-border bg-transparent px-2 py-1 text-[12px] focus:border-emerald-500 focus:outline-none"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
-                            const val = (e.target as HTMLInputElement).value.trim().toLowerCase().replace(/\s+/g, "_");
-                            if (!kycQuizFields.includes(val)) setKycQuizFields((prev) => [...prev, val]);
-                            (e.target as HTMLInputElement).value = "";
-                          }
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[12px] font-semibold text-text">Protected Fields (revealed after passing)</label>
-                    <p className="text-[11px] text-text-3 mb-2">These values are shown to the customer only after they pass verification.</p>
-                    <div className="flex flex-wrap gap-2">
-                      {kycProtectedFields.map((f) => (
-                        <span key={f} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-[12px] font-semibold text-amber-700">
-                          {f.replace(/_/g, " ")}
-                          <button type="button" onClick={() => setKycProtectedFields((prev) => prev.filter((x) => x !== f))} className="text-amber-400 hover:text-amber-700">
-                            <Icon name="close" size={12} />
-                          </button>
-                        </span>
-                      ))}
-                      <input
-                        placeholder="Add field..."
-                        className="w-28 rounded-lg border border-dashed border-border bg-transparent px-2 py-1 text-[12px] focus:border-amber-500 focus:outline-none"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
-                            const val = (e.target as HTMLInputElement).value.trim().toLowerCase().replace(/\s+/g, "_");
-                            if (!kycProtectedFields.includes(val)) setKycProtectedFields((prev) => [...prev, val]);
-                            (e.target as HTMLInputElement).value = "";
-                          }
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[12px] font-semibold text-text">Passing Score</label>
-                      <div className="mt-1.5 flex items-center gap-3">
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          step={5}
-                          value={kycPassingScore}
-                          onChange={(e) => setKycPassingScore(Number(e.target.value))}
-                          className="flex-1 accent-emerald-600"
-                        />
-                        <span className="text-[13px] font-bold text-emerald-600 w-10 text-right">{kycPassingScore}%</span>
+                return (
+                  <>
+                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3.5 flex items-start gap-2.5">
+                      <Icon name="shield" size={16} className="text-emerald-600 shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-[12px] text-text-2 leading-relaxed">
+                          Configure which fields the AI will quiz customers on, which fields are protected (revealed after verification), and the passing score.
+                        </p>
+                        {activeDs && (
+                          <p className="mt-1 text-[11.5px] font-semibold text-emerald-700">
+                            Linked Dataset: <span className="font-bold underline">{activeDs.name}</span> ({activeDs.rowCount} records) &middot; Lookup Key: <code className="font-mono bg-emerald-500/10 px-1 py-0.2 rounded text-emerald-800">{lookupCol}</code>
+                          </p>
+                        )}
                       </div>
                     </div>
-                    <div>
-                      <label className="text-[12px] font-semibold text-text">Failure Message</label>
-                      <input
-                        value={kycReferralMessage}
-                        onChange={(e) => setKycReferralMessage(e.target.value)}
-                        placeholder="Message shown when verification fails"
-                        className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-primary focus:outline-none"
-                      />
+
+                    {/* Interactive Column Chips from Dataset */}
+                    <div className="rounded-xl border border-border bg-surface-2 p-3.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <div>
+                          <span className="text-[12px] font-bold text-text">Columns in Dataset</span>
+                          <span className="ml-1.5 text-[11px] text-text-3">({availableCols.length} columns)</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const recommendedQuiz = ["full_name", "date_of_birth", "phone_number", "state_of_origin", "mother_maiden_name"].filter((c) => availableCols.includes(c));
+                            const recommendedProtected = ["balance", "account_type", "bvn_status", "kyc_tier"].filter((c) => availableCols.includes(c));
+                            setKycQuizFields(recommendedQuiz.length ? recommendedQuiz : ["full_name", "date_of_birth"]);
+                            setKycProtectedFields(recommendedProtected.length ? recommendedProtected : ["balance"]);
+                            toast("Applied Recommended Banking KYC Preset");
+                          }}
+                          className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 px-2.5 py-1 rounded-md transition-colors"
+                        >
+                          ⚡ Apply Recommended Banking Preset
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-text-3 mb-2.5">
+                        Click <strong className="text-emerald-600">+ Quiz</strong> to add to verification questions or <strong className="text-amber-600">+ Protected</strong> to reveal after passing:
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
+                        {availableCols.map((col) => {
+                          const isLookup = col.toLowerCase() === lookupCol.toLowerCase();
+                          const isQuiz = kycQuizFields.includes(col);
+                          const isProtected = kycProtectedFields.includes(col);
+
+                          return (
+                            <div
+                              key={col}
+                              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11.5px] transition-all ${
+                                isLookup
+                                  ? "border-primary/40 bg-primary/10 text-primary font-bold"
+                                  : isQuiz
+                                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 font-semibold"
+                                  : isProtected
+                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-700 font-semibold"
+                                  : "border-border bg-surface text-text-2 hover:border-border/80"
+                              }`}
+                            >
+                              <span className="font-mono">{col}</span>
+                              {isLookup ? (
+                                <span className="text-[9px] uppercase tracking-wider bg-primary text-white px-1 py-0.2 rounded font-bold">
+                                  Lookup Key
+                                </span>
+                              ) : (
+                                <div className="flex items-center gap-1 ml-1 border-l border-border/60 pl-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (isQuiz) setKycQuizFields((prev) => prev.filter((x) => x !== col));
+                                      else {
+                                        setKycQuizFields((prev) => [...prev, col]);
+                                        setKycProtectedFields((prev) => prev.filter((x) => x !== col));
+                                      }
+                                    }}
+                                    className={`text-[10px] px-1.5 py-0.5 rounded font-bold transition-colors ${
+                                      isQuiz ? "bg-emerald-600 text-white" : "text-emerald-600 hover:bg-emerald-500/10"
+                                    }`}
+                                  >
+                                    {isQuiz ? "Quiz ✓" : "+ Quiz"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (isProtected) setKycProtectedFields((prev) => prev.filter((x) => x !== col));
+                                      else {
+                                        setKycProtectedFields((prev) => [...prev, col]);
+                                        setKycQuizFields((prev) => prev.filter((x) => x !== col));
+                                      }
+                                    }}
+                                    className={`text-[10px] px-1.5 py-0.5 rounded font-bold transition-colors ${
+                                      isProtected ? "bg-amber-600 text-white" : "text-amber-600 hover:bg-amber-500/10"
+                                    }`}
+                                  >
+                                    {isProtected ? "Protected ✓" : "+ Protected"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                </>
-              )}
+
+                    <div>
+                      <label className="text-[12px] font-semibold text-text">Selected Quiz Fields ({kycQuizFields.length})</label>
+                      <p className="text-[11px] text-text-3 mb-2">Customer must answer these correctly during identity verification.</p>
+                      <div className="flex flex-wrap gap-2">
+                        {kycQuizFields.map((f) => (
+                          <span key={f} className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-[12px] font-semibold text-emerald-700">
+                            {f.replace(/_/g, " ")}
+                            <button type="button" onClick={() => setKycQuizFields((prev) => prev.filter((x) => x !== f))} className="text-emerald-400 hover:text-emerald-700">
+                              <Icon name="close" size={12} />
+                            </button>
+                          </span>
+                        ))}
+                        <input
+                          placeholder="Add field..."
+                          className="w-28 rounded-lg border border-dashed border-border bg-transparent px-2 py-1 text-[12px] focus:border-emerald-500 focus:outline-none"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
+                              const val = (e.target as HTMLInputElement).value.trim().toLowerCase().replace(/\s+/g, "_");
+                              if (!kycQuizFields.includes(val)) setKycQuizFields((prev) => [...prev, val]);
+                              (e.target as HTMLInputElement).value = "";
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[12px] font-semibold text-text">Selected Protected Fields ({kycProtectedFields.length})</label>
+                      <p className="text-[11px] text-text-3 mb-2">These values are revealed to the customer only after they pass verification.</p>
+                      <div className="flex flex-wrap gap-2">
+                        {kycProtectedFields.map((f) => (
+                          <span key={f} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-[12px] font-semibold text-amber-700">
+                            {f.replace(/_/g, " ")}
+                            <button type="button" onClick={() => setKycProtectedFields((prev) => prev.filter((x) => x !== f))} className="text-amber-400 hover:text-amber-700">
+                              <Icon name="close" size={12} />
+                            </button>
+                          </span>
+                        ))}
+                        <input
+                          placeholder="Add field..."
+                          className="w-28 rounded-lg border border-dashed border-border bg-transparent px-2 py-1 text-[12px] focus:border-amber-500 focus:outline-none"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
+                              const val = (e.target as HTMLInputElement).value.trim().toLowerCase().replace(/\s+/g, "_");
+                              if (!kycProtectedFields.includes(val)) setKycProtectedFields((prev) => [...prev, val]);
+                              (e.target as HTMLInputElement).value = "";
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[12px] font-semibold text-text">Passing Score</label>
+                        <div className="mt-1.5 flex items-center gap-3">
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={kycPassingScore}
+                            onChange={(e) => setKycPassingScore(Number(e.target.value))}
+                            className="flex-1 accent-emerald-600"
+                          />
+                          <span className="text-[13px] font-bold text-emerald-600 w-10 text-right">{kycPassingScore}%</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[12px] font-semibold text-text">Failure Message</label>
+                        <input
+                          value={kycReferralMessage}
+                          onChange={(e) => setKycReferralMessage(e.target.value)}
+                          placeholder="Message shown when verification fails"
+                          className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] text-text focus:border-primary focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
 
               {/* ── Doc Verify Field Matching ── */}
               {formToolType === "doc_verify" && (
@@ -2148,6 +2801,256 @@ export function AiToolsTab() {
               </div>
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Dataset Record Preview Modal */}
+      <Modal
+        open={previewModalOpen}
+        onClose={() => setPreviewModalOpen(false)}
+        title={`Dataset Records: ${previewDataSource?.name || ""}`}
+        size="2xl"
+        className="!max-w-[1240px] !w-[96vw]"
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-[12px] text-text-2">
+              <span>Lookup Key: <strong className="text-text font-mono">{previewDataSource?.lookupKey}</strong></span>
+              <span>•</span>
+              <span>Total Rows: <strong className="text-text">{previewTotal || previewDataSource?.rowCount || 0}</strong></span>
+            </div>
+            {previewDataSource && (
+              <button
+                type="button"
+                onClick={() => {
+                  setPreviewModalOpen(false);
+                  createToolFromDataSource(previewDataSource);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-700 transition-colors shadow-xs"
+              >
+                <Icon name="plus" size={13} />
+                Create Verification Tool
+              </button>
+            )}
+          </div>
+
+          {previewLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Spinner size={24} />
+            </div>
+          ) : previewRecords.length === 0 ? (
+            <div className="py-12 text-center text-text-3 text-[13px]">
+              No records found in this dataset.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-border">
+              <table className="w-full text-left text-[12px] whitespace-nowrap">
+                <thead className="border-b border-border bg-surface-2 text-text-3 font-semibold uppercase tracking-wider text-[10.5px]">
+                  <tr>
+                    <th className="px-3.5 py-2.5">Lookup ({previewDataSource?.lookupKey})</th>
+                    {(previewDataSource?.columns || []).filter((c) => c !== previewDataSource?.lookupKey).map((col) => (
+                      <th key={col} className="px-3.5 py-2.5">{col.replace(/_/g, " ")}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {previewRecords.map((rec) => (
+                    <tr key={rec.id} className="hover:bg-surface-2/60 transition-colors">
+                      <td className="px-3.5 py-2.5 font-mono font-semibold text-primary">
+                        {rec.lookupValue || (rec.data[previewDataSource?.lookupKey || ""] as string) || "—"}
+                      </td>
+                      {(previewDataSource?.columns || []).filter((c) => c !== previewDataSource?.lookupKey).map((col) => (
+                        <td key={col} className="px-3.5 py-2.5 text-text-2">
+                          {rec.data[col] !== undefined && rec.data[col] !== null ? String(rec.data[col]) : "—"}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Pagination Controls */}
+          {previewTotal > 20 && (
+            <div className="flex items-center justify-between pt-2 border-t border-border text-[12px]">
+              <span className="text-text-3">Page {previewPage} of {Math.ceil(previewTotal / 20)}</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={previewPage <= 1 || previewLoading}
+                  onClick={() => previewDataSource && loadPreviewRecords(previewDataSource.id, previewPage - 1)}
+                  className="rounded-lg border border-border px-3 py-1 text-text disabled:opacity-40 hover:bg-surface-2"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={previewPage * 20 >= previewTotal || previewLoading}
+                  onClick={() => previewDataSource && loadPreviewRecords(previewDataSource.id, previewPage + 1)}
+                  className="rounded-lg border border-border px-3 py-1 text-text disabled:opacity-40 hover:bg-surface-2"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* Standalone Upload Customer KYC Dataset Modal */}
+      <Modal
+        open={uploadModalOpen}
+        onClose={() => setUploadModalOpen(false)}
+        title="Upload Customer KYC Dataset"
+        size="md"
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-[12.5px] text-text-2">
+            Upload customer verification records in CSV format (up to 50MB). The system automatically parses headers and validates customer lookup keys.
+          </p>
+
+          {/* Dropzone */}
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) handleFileSelect(file);
+            }}
+            className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center transition-all cursor-pointer ${
+              isDragging
+                ? "border-emerald-500 bg-emerald-500/10 scale-[1.01]"
+                : kycUploadFile
+                ? "border-emerald-500/50 bg-emerald-500/5"
+                : "border-border hover:border-primary/50 hover:bg-surface-2/40"
+            }`}
+            onClick={() => document.getElementById("standalone-kyc-file-input")?.click()}
+          >
+            <input
+              id="standalone-kyc-file-input"
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileSelect(file);
+              }}
+            />
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 mb-2">
+              <Icon name="upload" size={22} />
+            </div>
+            {kycUploadFile ? (
+              <>
+                <p className="text-[13px] font-semibold text-text">{kycUploadFile.name}</p>
+                <p className="text-[11.5px] text-text-3 mt-0.5">
+                  {(kycUploadFile.size / 1024).toFixed(1)} KB • {detectedRowCount > 0 ? `${detectedRowCount} customer rows` : "Ready to upload"}
+                </p>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setKycUploadFile(null);
+                    setDetectedColumns([]);
+                    setDetectedRowCount(0);
+                  }}
+                  className="mt-2 text-[11px] font-semibold text-danger hover:underline"
+                >
+                  Change File
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-[13px] font-medium text-text">
+                  Drag and drop your customer CSV file here, or <span className="text-emerald-600 font-semibold underline">browse</span>
+                </p>
+                <p className="text-[11.5px] text-text-3 mt-1">Supports UTF-8 CSV with column headers (e.g. account_number, full_name, etc.)</p>
+              </>
+            )}
+          </div>
+
+          {/* Configuration */}
+          <div className="flex flex-col gap-3">
+            <div>
+              <label className="text-[12px] font-semibold text-text">Dataset Name</label>
+              <input
+                value={kycUploadName}
+                onChange={(e) => setKycUploadName(e.target.value)}
+                placeholder="e.g. Core Banking Customers 2026"
+                className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-text focus:border-primary focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="text-[12px] font-semibold text-text">Customer Lookup Key (Primary Identifier)</label>
+              {detectedColumns.length > 0 ? (
+                <select
+                  value={kycUploadLookupKey}
+                  onChange={(e) => setKycUploadLookupKey(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-text focus:border-primary focus:outline-none"
+                >
+                  {detectedColumns.map((col) => (
+                    <option key={col} value={col}>
+                      {col} {["account_number", "email", "phone_number", "bvn", "customer_id"].includes(col) ? "(Recommended)" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={kycUploadLookupKey}
+                  onChange={(e) => setKycUploadLookupKey(e.target.value)}
+                  placeholder="e.g. account_number"
+                  className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-[12.5px] text-text focus:border-primary focus:outline-none"
+                />
+              )}
+              <p className="text-[11px] text-text-3 mt-1">
+                The AI will prompt the customer for this identifier to locate their record during conversation.
+              </p>
+            </div>
+
+            {detectedColumns.length > 0 && (
+              <div>
+                <label className="text-[11.5px] font-semibold text-text-2">Detected Columns ({detectedColumns.length})</label>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {detectedColumns.map((col) => (
+                    <span
+                      key={col}
+                      className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-mono ${
+                        col === kycUploadLookupKey
+                          ? "bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 font-bold border border-emerald-500/30"
+                          : "bg-surface-2 text-text-2 border border-border"
+                      }`}
+                    >
+                      {col}
+                      {col === kycUploadLookupKey && " ★"}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-border">
+            <button
+              type="button"
+              onClick={() => setUploadModalOpen(false)}
+              className="rounded-lg border border-border px-4 py-2 text-[12px] font-semibold text-text hover:bg-surface-2"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!kycUploadFile || kycUploading}
+              onClick={uploadKycFile}
+              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-[12px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-40 transition-colors shadow-sm"
+            >
+              {kycUploading ? <Spinner size={14} /> : <Icon name="upload" size={14} />}
+              {kycUploading ? "Uploading & Indexing..." : "Upload & Save Dataset"}
+            </button>
+          </div>
         </div>
       </Modal>
     </div>

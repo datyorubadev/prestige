@@ -7,6 +7,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Pill } from "@/components/ui/pill";
 import { Select } from "@/components/ui/select";
 import { Modal } from "@/components/ui/modal";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LabelChip } from "@/components/ui/label-chip";
 import { avatarColorFor, channelLabel, cn, isResolved, ticketNumberFor } from "@/lib/utils";
@@ -89,10 +90,13 @@ export function TicketList() {
   // Queue state persists in the URL (?view=&q=&status=&priority=&assignee=
   // &channel=&label=&sort=&page=) so navigating away/back or refreshing
   // restores the exact view. `?email=` still seeds the search once.
-  const [viewRaw, setViewRaw] = useUrlState(
-    "view",
-    searchParams.get("mine") === "true" ? "Mine" : "All",
-  );
+  const defaultView = useMemo(() => {
+    const fromView = searchParams.get("view");
+    if (fromView) return fromView;
+    return searchParams.get("mine") === "true" ? "Mine" : "All";
+  }, [searchParams]);
+
+  const [viewRaw, setViewRaw] = useUrlState("view", defaultView);
   const view = viewRaw as QueueFilter;
   const setView = setViewRaw as (v: QueueFilter) => void;
   const [query, setQuery] = useState(() => searchParams.get("email") ?? searchParams.get("q") ?? "");
@@ -163,7 +167,7 @@ export function TicketList() {
   const counts = useMemo(() => {
     const list = tickets ?? [];
     const mentions = agentName
-      ? list.filter((t) => t.msgs?.some((m) => m.kind === "note" && m.text.includes(`@${agentName}`)))
+      ? list.filter((t) => (t.msgs ?? []).some((m) => m?.kind === "note" && (m?.text ?? "").includes(`@${agentName}`)))
       : [];
     return {
       All: list.length,
@@ -181,8 +185,10 @@ export function TicketList() {
     if (view === "Unassigned") list = list.filter((t) => !t.assignee && !isResolved(t.status));
     if (view === "Escalated") list = list.filter((t) => t.status === "escalated");
     if (view === "Resolved") list = list.filter((t) => isResolved(t.status));
-    if (view === "Mentions" && agentName) {
-      list = list.filter((t) => t.msgs.some((m) => m.kind === "note" && m.text.includes(`@${agentName}`)));
+    if (view === "Mentions") {
+      list = agentName
+        ? list.filter((t) => (t.msgs ?? []).some((m) => m?.kind === "note" && (m?.text ?? "").includes(`@${agentName}`)))
+        : [];
     }
     const q = query.trim().toLowerCase();
     if (q) {
@@ -219,7 +225,15 @@ export function TicketList() {
   const pageItems = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
   const loading = !tickets;
 
-  const hasActiveFilters = !!(status || priority || channel || assignee || label || query.trim());
+  const hasActiveFilters = !!(
+    status ||
+    priority ||
+    channel ||
+    assignee ||
+    label ||
+    query.trim() ||
+    (view && view !== "All")
+  );
 
   const activeFilterCount = [status, priority, channel, assignee, label].filter(Boolean).length;
 
@@ -275,15 +289,15 @@ export function TicketList() {
       .catch(() => {});
   };
 
-  const bulkDelete = async () => {
-    if (!window.confirm(`Are you sure you want to permanently delete ${selected.size} ticket(s)? This action will be recorded in the audit trail.`)) {
-      return;
-    }
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+
+  const executeBulkDelete = async () => {
     setDeleting(true);
     try {
       await Promise.all([...selected].map((id) => api.delete(`/tickets/${id}`)));
       toast(`${selected.size} ticket(s) deleted`);
       setSelected(new Set());
+      setDeleteModalOpen(false);
       refreshTickets();
     } catch {
       toast("Could not delete selected tickets", "danger");
@@ -383,7 +397,7 @@ export function TicketList() {
                 type="button"
                 onClick={() => setQuery("")}
                 aria-label="Clear search"
-                className="absolute right-2 top-1/2 flex h-[18px] w-[18px] -translate-y-1/2 items-center justify-center rounded-full text-text-3 transition-colors duration-150 hover:bg-surface-3 hover:text-text"
+                className="absolute right-2 top-1/2 flex h-[18px] w-[18px] -translate-y-1/2 items-center justify-center rounded-full text-text-3 transition-colors duration-150 hover:bg-surface-3 hover:text-text cursor-pointer"
               >
                 <Icon name="close" size={12} />
               </button>
@@ -395,7 +409,7 @@ export function TicketList() {
             aria-expanded={filtersOpen}
             aria-pressed={filtersOpen}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-sm border px-2.5 py-1.5 text-[12px] font-semibold transition-colors duration-150",
+              "inline-flex items-center gap-1.5 rounded-sm border px-2.5 py-1.5 text-[12px] font-semibold transition-colors duration-150 cursor-pointer",
               filtersOpen
                 ? "border-primary bg-primary-soft text-primary-dark"
                 : "border-border bg-surface text-text-2 hover:bg-surface-2 hover:text-text",
@@ -435,10 +449,10 @@ export function TicketList() {
               }}
               aria-pressed={view === v}
               className={cn(
-                "flex items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2 text-[12.5px] font-medium !bg-transparent focus:outline-none transition-colors",
+                "flex items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2 text-[12.5px] font-medium !bg-transparent focus:outline-none transition-colors cursor-pointer",
                 view === v
                   ? "border-primary font-semibold text-text"
-                  : "border-transparent text-text-2 hover:text-text",
+                  : "border-transparent text-text-2 hover:border-border-strong hover:text-text",
               )}
             >
               <span className={view === v ? "text-text font-semibold" : "text-text-2"}>{v}</span>
@@ -590,11 +604,11 @@ export function TicketList() {
               </button>
               <button
                 type="button"
-                onClick={() => void bulkDelete()}
+                onClick={() => setDeleteModalOpen(true)}
                 disabled={deleting}
                 className="inline-flex items-center gap-1.5 rounded-sm border border-danger/30 bg-danger/10 px-3 py-1.5 text-[12px] font-semibold text-danger transition-colors duration-150 hover:bg-danger hover:text-white disabled:opacity-50"
               >
-                <Icon name="close" size={13} />
+                <Icon name="trash" size={13} />
                 {deleting ? "Deleting…" : "Delete"}
               </button>
               <button
@@ -756,6 +770,21 @@ export function TicketList() {
           </Field>
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={deleteModalOpen}
+        title={selected.size === 1 ? "Delete ticket?" : `Delete ${selected.size} tickets?`}
+        description={
+          selected.size === 1
+            ? "Are you sure you want to permanently delete this conversation? All associated messages and activity history will be permanently removed. This action cannot be undone and will be recorded in the audit trail."
+            : `Are you sure you want to permanently delete these ${selected.size} conversations? All associated messages and activity history will be permanently removed. This action cannot be undone and will be recorded in the audit trail.`
+        }
+        confirmLabel={selected.size === 1 ? "Delete ticket" : `Delete ${selected.size} tickets`}
+        tone="danger"
+        busy={deleting}
+        onConfirm={() => void executeBulkDelete()}
+        onClose={() => setDeleteModalOpen(false)}
+      />
     </div>
   );
 }
@@ -817,7 +846,7 @@ function PageBtn({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex h-[28px] min-w-[28px] items-center justify-center rounded-sm px-1.5 text-[12px] font-semibold tabular-nums transition-colors duration-150",
+        "flex h-[28px] min-w-[28px] items-center justify-center rounded-sm px-1.5 text-[12px] font-semibold tabular-nums transition-colors duration-150 cursor-pointer",
         active ? "bg-text text-white" : "border border-border bg-surface text-text-2 hover:bg-surface-2 hover:text-text",
       )}
     >

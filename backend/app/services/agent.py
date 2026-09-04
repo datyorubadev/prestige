@@ -56,6 +56,26 @@ class AgentState(TypedDict, total=False):
     response_by: str
 
 
+def sanitize_human_tone(text: str) -> str:
+    """Ensure bot replies sound natural, warm, and human without em-dashes, en-dashes, or double hyphens."""
+    if not text or not isinstance(text, str):
+        return text
+    import re
+    # Replace em-dashes, en-dashes, and double hyphens with natural punctuation
+    text = re.sub(r'\s*—\s*', ', ', text)
+    text = re.sub(r'\s*–\s*', ', ', text)
+    text = re.sub(r'\s*--\s*', ', ', text)
+    # Fix consecutive commas or misplaced punctuation
+    text = re.sub(r',\s*,+', ',', text)
+    text = re.sub(r'\.\s*,+', '.', text)
+    text = re.sub(r',\s*\.+', '.', text)
+    # Standardize curly quotes and apostrophes
+    text = text.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    # Collapse multiple spaces
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
+
+
 # ---------------------------------------------------------------- checkpointer
 
 def _redis_available() -> bool:
@@ -135,6 +155,9 @@ def _load_customer(state: AgentState) -> dict:
 
 
 def _route_path(state: AgentState) -> list[str]:
+    # If state already has a complete reply (e.g. from KYC or interactive session), route directly to generate
+    if state.get("reply"):
+        return ["generate"]
     q = (state.get("query") or "").lower()
     targets: list[str] = []
     if any(k in q for k in ("refund", "money back", "reversal", "compensation")):
@@ -209,9 +232,6 @@ def _run_tools(state: AgentState) -> dict:
       - "callback"   → slot lookup + booking
     """
     query = state["query"]
-    deterministic = heuristic_tool_results(query)
-    if deterministic:
-        return {"tool_results": deterministic}
     results: list[str] = []
 
     # Dynamic Tenant Custom Tools
@@ -223,9 +243,10 @@ def _run_tools(state: AgentState) -> dict:
             or db.query(Tenant).filter(Tenant.slug == state["tenant_id"].lower()).first()
         )
         if not tenant:
-            if not results:
-                return {}
-            return {"tool_results": results}
+            deterministic = heuristic_tool_results(query)
+            if deterministic:
+                return {"tool_results": deterministic}
+            return {}
 
         custom_tools = (
             db.query(TenantCustomTool)
@@ -233,18 +254,65 @@ def _run_tools(state: AgentState) -> dict:
             .all()
         )
 
-        # ── Check for active multi-turn sessions (KYC / doc_verify / callback) ──
+        # ── Check for active multi-turn sessions (KYC / doc_verify / callback) FIRST ──
         active_session_result = _check_active_sessions(db, state, custom_tools)
         if active_session_result is not None:
             return active_session_result
 
         # ── Keyword-match new tool invocations ──
         for ct in custom_tools:
-            if ct.name not in query.lower() and ct.display_name.lower() not in query.lower():
+            tool_type = getattr(ct, "tool_type", "api") or "api"
+            matched = False
+
+            # Exact or substring match on name or display_name
+            if ct.name.lower() in query.lower() or ct.display_name.lower() in query.lower():
+                matched = True
+
+            # For KYC tools: trigger if customer asks for verification or protected account info
+            if not matched and tool_type == "kyc":
+                from app.models.kyc import KYCVerificationSession
+                already_passed = (
+                    db.query(KYCVerificationSession)
+                    .filter(
+                        KYCVerificationSession.ticket_id == state["ticket_id"],
+                        KYCVerificationSession.status == "passed",
+                    )
+                    .order_by(KYCVerificationSession.created_at.desc())
+                    .first()
+                )
+                if already_passed and _is_kyc_session_valid(db, already_passed):
+                    continue
+
+                kyc_triggers = (
+                    "verify", "verification", "kyc", "identity", "authenticate",
+                    "account number", "account num", "account no", "account #",
+                    "my account", "my balance", "account balance", "bank balance",
+                    "my bvn", "my nin", "statement", "profile", "account details",
+                    "access my account", "who am i", "my details",
+                    "address", "my address", "home address", "residential address",
+                    "where do i live", "customer details", "all details"
+                )
+                if any(trig in query.lower() for trig in kyc_triggers):
+                    matched = True
+
+                # Also check protected fields in tool config
+                if not matched and ct.config:
+                    try:
+                        cfg = json.loads(ct.config)
+                        prot = cfg.get("protectedFields") or []
+                        for pf in prot:
+                            pf_clean = pf.replace("_", " ").lower()
+                            if pf_clean in query.lower():
+                                matched = True
+                                break
+                    except Exception:
+                        pass
+
+            if not matched:
                 continue
 
             if ct.requires_approval:
-                pending_reply = f"I've initiated {ct.display_name} for you — our team is confirming the action and will complete it shortly."
+                pending_reply = f"I've initiated {ct.display_name} for you, our team is confirming the action and will complete it shortly."
                 approval = interrupt({
                     "type": "custom_tool",
                     "tool_id": ct.id,
@@ -257,9 +325,7 @@ def _run_tools(state: AgentState) -> dict:
                     "status": "pending",
                 })
                 if not approval or not approval.get("approved"):
-                    return {"tool_results": [f"{ct.name}: not approved"], "reply": f"I understand — I have cancelled the {ct.display_name} action."}
-
-            tool_type = getattr(ct, "tool_type", "api") or "api"
+                    return {"tool_results": [f"{ct.name}: not approved"], "reply": f"I understand, I have cancelled the {ct.display_name} action."}
 
             if tool_type == "kyc":
                 out = _run_kyc_tool(db, ct, state)
@@ -273,7 +339,17 @@ def _run_tools(state: AgentState) -> dict:
             ct.execution_count = (ct.execution_count or 0) + 1
             ct.last_executed_at = utcnow()
             db.commit()
+
+            if isinstance(out, dict):
+                return out
             results.append(f"{ct.name}: {out}")
+
+        if not results:
+            has_kyc_tool = any(getattr(ct, "tool_type", "") == "kyc" for ct in custom_tools)
+            deterministic = heuristic_tool_results(query)
+            if deterministic:
+                if not (has_kyc_tool and any("check_government_kyc_status" in d for d in deterministic)):
+                    return {"tool_results": deterministic}
     except Exception:
         pass
     finally:
@@ -330,6 +406,34 @@ def _run_tools(state: AgentState) -> dict:
     return {"tool_results": results}
 
 
+def _is_kyc_session_valid(db, session) -> bool:
+    """Verify that a passed KYC session is still active and within its security window.
+    A session is invalid/expired if:
+    1. The associated ticket is closed or resolved.
+    2. The session has exceeded 30 minutes of inactivity.
+    """
+    if not session or getattr(session, "status", None) != "passed":
+        return False
+
+    from app.models import Ticket
+    from app.models.common import TicketStatus
+    from datetime import datetime, timezone, timedelta
+
+    ticket = db.get(Ticket, session.ticket_id)
+    if ticket and ticket.status in (TicketStatus.CLOSED, TicketStatus.RESOLVED):
+        return False
+
+    session_time = session.updated_at or session.created_at
+    if session_time:
+        now = datetime.now(timezone.utc) if session_time.tzinfo else datetime.utcnow()
+        if (now - session_time) > timedelta(minutes=30):
+            session.status = "expired"
+            db.commit()
+            return False
+
+    return True
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Multi-turn session dispatcher
 # ──────────────────────────────────────────────────────────────────────────────
@@ -356,8 +460,86 @@ def _check_active_sessions(db, state: AgentState, custom_tools: list) -> dict | 
         .order_by(KYCVerificationSession.created_at.desc())
         .first()
     )
+    if not kyc_session:
+        # Check if there is a recently failed session for this ticket where the customer is retrying
+        recent_failed = (
+            db.query(KYCVerificationSession)
+            .filter(
+                KYCVerificationSession.ticket_id == ticket_id,
+                KYCVerificationSession.status == "failed",
+            )
+            .order_by(KYCVerificationSession.created_at.desc())
+            .first()
+        )
+        if recent_failed and recent_failed.record_id:
+            retry_signals = ("retry", "again", "try", "name:", "bvn", "dob", "birth", "phone", "mother")
+            if any(sig in query_lower for sig in retry_signals):
+                recent_failed.status = "in_progress"
+                db.commit()
+                kyc_session = recent_failed
+
     if kyc_session:
         return _continue_kyc_session(db, kyc_session, state)
+
+    # ── Already Passed KYC session for this ticket ──
+    passed_session = (
+        db.query(KYCVerificationSession)
+        .filter(
+            KYCVerificationSession.ticket_id == ticket_id,
+            KYCVerificationSession.status == "passed",
+        )
+        .order_by(KYCVerificationSession.created_at.desc())
+        .first()
+    )
+    if passed_session and _is_kyc_session_valid(db, passed_session) and passed_session.record_id:
+        from app.models.kyc import KYCRecord
+        record = db.get(KYCRecord, passed_session.record_id)
+        if record and record.data:
+            record_data = json.loads(record.data)
+            detected = _detect_requested_fields(query_lower, list(record_data.keys()))
+            if detected:
+                if "all" in detected:
+                    fields_to_show = [
+                        k for k in record_data.keys()
+                        if k not in ("mother_maiden_name",) and not k.endswith("_hash")
+                    ]
+                else:
+                    fields_to_show = [f for f in detected if f in record_data]
+
+                if fields_to_show:
+                    if len(fields_to_show) == 1:
+                        field = fields_to_show[0]
+                        label = _format_field_label(field)
+                        val = record_data[field]
+                        reply = (
+                            f"Here is your {label.lower()}:\n\n"
+                            f"- {label}: {val}\n\n"
+                            f"Please let me know if you need any additional assistance."
+                        )
+                    else:
+                        lines = [f"- {_format_field_label(f)}: {record_data[f]}" for f in fields_to_show]
+                        reply = (
+                            f"Here are your requested details from your verified account:\n\n"
+                            f"{'\n'.join(lines)}\n\n"
+                            f"Please let me know if you need any additional assistance."
+                        )
+                    from datetime import datetime
+                    passed_session.updated_at = datetime.utcnow()
+                    db.commit()
+                    return {
+                        "tool_results": [
+                            f"kyc: Customer already verified. Retrieved: {json.dumps({f: record_data[f] for f in fields_to_show})}"
+                        ],
+                        "reply": sanitize_human_tone(reply),
+                    }
+                else:
+                    return {
+                        "tool_results": [f"kyc: Customer already verified. Field '{detected}' not on file."],
+                        "reply": sanitize_human_tone(
+                            "I checked your verified account record, but that specific detail is not on file. "
+                            "Please let me know if you need your account number, balance, registered address, or other details on file."
+                        ),
+                    }
 
     return None
 
@@ -366,25 +548,111 @@ def _check_active_sessions(db, state: AgentState, custom_tools: list) -> dict | 
 # KYC Tool
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _run_kyc_tool(db, tool, state: AgentState) -> str:
-    """Start a KYC verification flow. Creates a session and asks for lookup value."""
+def _find_kyc_record(db, data_source_id: str, lookup_value: str):
+    """Find a KYC record by exact lookup_value or by searching fields inside record.data JSON."""
+    from app.models.kyc import KYCRecord
+    from sqlalchemy import func
+    import json
+    import re
+
+    val = (lookup_value or "").strip().lower()
+    if not val:
+        return None
+
+    # 1. Exact match on lookup_value column
+    rec = (
+        db.query(KYCRecord)
+        .filter(
+            KYCRecord.data_source_id == data_source_id,
+            KYCRecord.lookup_value == val,
+        )
+        .first()
+    )
+    if rec:
+        return rec
+
+    rec = (
+        db.query(KYCRecord)
+        .filter(
+            KYCRecord.data_source_id == data_source_id,
+            func.lower(KYCRecord.lookup_value) == val,
+        )
+        .first()
+    )
+    if rec:
+        return rec
+
+    # 2. Search inside KYCRecord.data JSON
+    candidates = (
+        db.query(KYCRecord)
+        .filter(
+            KYCRecord.data_source_id == data_source_id,
+            KYCRecord.data.ilike(f"%{val}%"),
+        )
+        .all()
+    )
+    for cand in candidates:
+        try:
+            cand_data = json.loads(cand.data) if cand.data else {}
+            for k, v in cand_data.items():
+                if v is not None and str(v).strip().lower() == val:
+                    return cand
+        except Exception:
+            continue
+
+    # 3. Phone normalization search (digits comparison)
+    val_digits = re.sub(r'\D', '', val)
+    if len(val_digits) >= 7:
+        phone_cands = (
+            db.query(KYCRecord)
+            .filter(
+                KYCRecord.data_source_id == data_source_id,
+                KYCRecord.data.ilike(f"%{val_digits[-7:]}%"),
+            )
+            .all()
+        )
+        for cand in phone_cands:
+            try:
+                cand_data = json.loads(cand.data) if cand.data else {}
+                for k in ("phone", "phone_number", "mobile", "mobile_number"):
+                    if k in cand_data:
+                        cand_digits = re.sub(r'\D', '', str(cand_data[k]))
+                        if cand_digits and cand_digits[-7:] == val_digits[-7:]:
+                            return cand
+            except Exception:
+                continue
+
+    return None
+
+
+def _run_kyc_tool(db, tool, state: AgentState) -> dict:
+    """Start a KYC verification flow. Creates a session and prompts customer for their identifier."""
     from app.models.kyc import KYCDataSource, KYCRecord, KYCVerificationSession
     import json
 
+    query = state["query"]
     config = json.loads(tool.config) if tool.config else {}
     data_source_id = config.get("dataSourceId")
-    quiz_fields = config.get("quizFields", ["full_name", "date_of_birth", "phone"])
-    protected_fields = config.get("protectedFields", ["account_number", "balance", "address"])
+    quiz_fields = config.get("quizFields", ["full_name", "date_of_birth", "phone_number"])
+    protected_fields = config.get("protectedFields", ["account_number", "balance", "account_type"])
     passing_score = config.get("passingScore", 0.6)
     total_questions = config.get("totalQuestions", 3)
-    referral_message = config.get("referralMessage", "I'll need to refer you to our office for verification.")
+    referral_message = config.get("referralMessage", "Please kindly visit our office or contact our support team for further assistance.")
 
     if not data_source_id:
-        return "KYC tool is not configured — no data source linked."
+        return {
+            "tool_results": ["kyc: Tool not configured, no data source linked"],
+            "reply": "Identity verification is currently unavailable. Please contact our support team.",
+        }
 
     data_source = db.get(KYCDataSource, data_source_id)
     if not data_source:
-        return "KYC data source not found. Please re-upload the customer data file."
+        return {
+            "tool_results": ["kyc: Data source not found"],
+            "reply": "Identity verification data source is unavailable. Please contact our support team.",
+        }
+
+    req_fields = _detect_requested_fields(query)
 
     # Create a new verification session
     session = KYCVerificationSession(
@@ -392,18 +660,61 @@ def _run_kyc_tool(db, tool, state: AgentState) -> str:
         tenant_id=state["tenant_id"],
         tool_id=tool.id,
         data_source_id=data_source_id,
+        requested_fields=json.dumps(req_fields) if req_fields else None,
         status="pending_lookup",
     )
     db.add(session)
     db.commit()
     db.refresh(session)
 
-    lookup_key = data_source.lookup_key or "email"
-    return (
-        f"[KYC] Starting identity verification. "
-        f"Ask the customer for their {lookup_key} so we can locate their record. "
-        f"Session ID: {session.id}"
-    )
+    # Check if the customer already included an identifier in their initial query
+    lookup_val = _extract_lookup_value(query, data_source.lookup_key or "email")
+    found_record = None
+    if lookup_val and len(lookup_val) >= 4 and lookup_val.lower() not in (
+        "i need my account number", "account number", "verify", "help", "hello", "hi people"
+    ):
+        found_record = _find_kyc_record(db, data_source_id, lookup_val)
+
+    if found_record:
+        record_data = json.loads(found_record.data) if found_record.data else {}
+        questions = _generate_kyc_questions(quiz_fields, record_data, total_questions, exclude_value=lookup_val)
+        session.record_id = found_record.id
+        session.lookup_value_used = lookup_val
+        session.questions_asked = json.dumps(questions)
+        session.total_questions = len(questions)
+        session.status = "in_progress"
+        db.commit()
+
+        q_lines = [f"{i+1}. {q['question']}" for i, q in enumerate(questions)]
+        q_text = "\n".join(q_lines)
+        reply = (
+            f"To keep your account safe, please answer these quick verification questions:\n\n"
+            f"{q_text}"
+        )
+        return {
+            "tool_results": [f"kyc: Found record for '{lookup_val}'. Quiz:\n{q_text}"],
+            "reply": sanitize_human_tone(reply),
+        }
+
+    # Prompt customer warmly for their email or phone number
+    if req_fields and "all" not in req_fields:
+        asked_labels = [_format_field_label(f).lower() for f in req_fields]
+        focus_str = " and ".join(asked_labels)
+        reply = (
+            f"I will be happy to help you with your {focus_str}. "
+            f"For your security, I need to verify your identity first. "
+            f"Could you please share the registered email address or phone number linked to your account?"
+        )
+    else:
+        reply = (
+            "I will be happy to help you with your account details. "
+            "For your security, I need to verify your identity first. "
+            "Could you please share the registered email address or phone number linked to your account?"
+        )
+    return {
+        "tool_results": [f"[KYC] Started verification session {session.id}. Prompting customer for identifier."],
+        "reply": sanitize_human_tone(reply),
+    }
 
 
 def _continue_kyc_session(db, session, state: AgentState) -> dict:
@@ -415,39 +726,42 @@ def _continue_kyc_session(db, session, state: AgentState) -> dict:
     query = state["query"]
     tool = db.get(TenantCustomTool, session.tool_id)
     if not tool:
-        return {"tool_results": ["kyc: Tool no longer exists"], "reply": "Verification tool unavailable."}
+        return {"tool_results": ["kyc: Tool no longer exists"], "reply": "Verification service is currently unavailable."}
 
     config = json.loads(tool.config) if tool.config else {}
-    quiz_fields = config.get("quizFields", ["full_name", "date_of_birth", "phone"])
-    protected_fields = config.get("protectedFields", ["account_number", "balance", "address"])
+    quiz_fields = config.get("quizFields", ["full_name", "date_of_birth", "phone_number"])
+    protected_fields = config.get("protectedFields", ["account_number", "balance", "account_type"])
     passing_score = config.get("passingScore", 0.6)
     total_questions = config.get("totalQuestions", 3)
-    referral_message = config.get("referralMessage", "I'll need to refer you to our office for verification.")
+    referral_message = config.get("referralMessage", "Please kindly visit our office or contact our support team for further assistance.")
 
     data_source = db.get(KYCDataSource, session.data_source_id)
+    lookup_key = (data_source.lookup_key if data_source else None) or "email"
 
     if session.status == "pending_lookup":
-        # Customer provided their lookup value — find their record
-        lookup_key = data_source.lookup_key or "email"
         lookup_value = _extract_lookup_value(query, lookup_key)
-
-        record = (
-            db.query(KYCRecord)
-            .filter(
-                KYCRecord.data_source_id == session.data_source_id,
-                KYCRecord.lookup_value == lookup_value.lower().strip(),
-            )
-            .first()
-        )
+        record = _find_kyc_record(db, session.data_source_id, lookup_value)
         if not record:
-            session.status = "failed"
+            session.total_questions = (session.total_questions or 0) + 1
+            if session.total_questions >= 3:
+                session.status = "failed"
+                db.commit()
+                return {
+                    "tool_results": [f"kyc: No record found after multiple attempts for '{lookup_value}'"],
+                    "reply": sanitize_human_tone(referral_message),
+                }
             db.commit()
-            return {"tool_results": [f"kyc: No record found for {lookup_key}='{lookup_value}'"],
-                    "reply": f"I couldn't find a record matching that {lookup_key}. Please double-check and try again, or contact our office."}
+            return {
+                "tool_results": [f"kyc: No record found for '{lookup_value}'"],
+                "reply": sanitize_human_tone(
+                    f"I could not locate an account matching '{lookup_value}'. "
+                    "Please double-check your registered email, phone number, or account number and share it again so I can look it up."
+                ),
+            }
 
-        # Record found — generate quiz questions
+        # Record found, generate quiz questions
         record_data = json.loads(record.data) if record.data else {}
-        questions = _generate_kyc_questions(quiz_fields, record_data, total_questions)
+        questions = _generate_kyc_questions(quiz_fields, record_data, total_questions, exclude_value=lookup_value)
 
         session.record_id = record.id
         session.lookup_value_used = lookup_value
@@ -456,82 +770,246 @@ def _continue_kyc_session(db, session, state: AgentState) -> dict:
         session.status = "in_progress"
         db.commit()
 
-        q_text = "\n".join(f"  {i+1}. {q['question']}" for i, q in enumerate(questions))
-        return {"tool_results": [f"kyc: Found record. Quiz: {q_text}"],
-                "reply": f"I found your record. Please answer these verification questions:\n{q_text}"}
+        q_lines = [f"{i+1}. {q['question']}" for i, q in enumerate(questions)]
+        q_text = "\n".join(q_lines)
+        reply = (
+            f"Thank you, I found your record. To verify your identity, please answer these quick security questions:\n\n"
+            f"{q_text}"
+        )
+        return {
+            "tool_results": [f"kyc: Found record for '{lookup_value}'. Quiz:\n{q_text}"],
+            "reply": sanitize_human_tone(reply),
+        }
 
     elif session.status == "in_progress":
-        # Customer answered quiz questions — score them
         questions = json.loads(session.questions_asked) if session.questions_asked else []
         record = db.get(KYCRecord, session.record_id) if session.record_id else None
         if not record:
             session.status = "failed"
             db.commit()
-            return {"tool_results": ["kyc: Record lost"], "reply": referral_message}
+            return {"tool_results": ["kyc: Record lost"], "reply": sanitize_human_tone(referral_message)}
 
         record_data = json.loads(record.data) if record.data else {}
         answers = _parse_quiz_answers(query, len(questions))
-        score = _score_kyc_answers(questions, answers, record_data)
+        score = _score_kyc_answers(questions, answers, record_data, raw_query=query)
 
         session.score = score
         session.passed = score >= passing_score
         session.failed = score < passing_score
         session.status = "passed" if session.passed else "failed"
 
-        # Update questions with answers
         for i, q in enumerate(questions):
-            if i < len(answers):
-                q["answer_given"] = answers[i]
-                q["correct"] = _fuzzy_match(answers[i], record_data.get(q["field"], ""))
+            field = q["field"]
+            expected_val = record_data.get(field, "")
+            labeled = _extract_labeled_field(field, query) if query else None
+            ans_given = labeled or (answers[i] if i < len(answers) else None)
+            is_match = False
+            if ans_given and _fuzzy_match(ans_given, expected_val):
+                is_match = True
+            elif _fuzzy_match_in_text(expected_val, query):
+                is_match = True
+                ans_given = str(expected_val)
+            q["answer_given"] = ans_given
+            q["correct"] = is_match
+
         session.questions_asked = json.dumps(questions)
         db.commit()
 
         if session.passed:
-            # Return all protected field values
-            protected_values = {f: record_data.get(f, "N/A") for f in protected_fields}
-            values_text = "\n".join(f"  {k}: {v}" for k, v in protected_values.items())
-            return {"tool_results": [f"kyc: PASSED (score {score:.0%}). Protected data: {values_text}"],
-                    "reply": f"Verification passed! Here are your details:\n{values_text}"}
+            # Check what fields the customer originally asked for
+            req_fields: list[str] = []
+            if getattr(session, "requested_fields", None):
+                try:
+                    req_fields = json.loads(session.requested_fields)
+                except Exception:
+                    req_fields = []
+
+            # Fallback: check conversation history in ticket for what customer asked for
+            if not req_fields:
+                from app.models import Ticket
+                ticket = db.get(Ticket, session.ticket_id)
+                if ticket and ticket.messages:
+                    for m in ticket.messages:
+                        if m.sender_type == "customer":
+                            detected = _detect_requested_fields(m.body, list(record_data.keys()))
+                            if detected:
+                                req_fields = detected
+                                break
+
+            # Determine fields to show
+            fields_to_show: list[str] = []
+            if req_fields and "all" not in req_fields:
+                fields_to_show = [f for f in req_fields if f in record_data]
+
+            if fields_to_show:
+                # Customer only asked for specific detail(s) - provide ONLY what was requested!
+                detail_lines = [f"- {_format_field_label(f)}: {record_data[f]}" for f in fields_to_show]
+                details_str = "\n".join(detail_lines)
+                if len(fields_to_show) == 1:
+                    label = _format_field_label(fields_to_show[0])
+                    reply = (
+                        f"Verification successful! Here is your {label.lower()}:\n\n"
+                        f"{details_str}\n\n"
+                        f"Please let me know if you need any additional assistance."
+                    )
+                else:
+                    reply = (
+                        f"Verification successful! Here are your requested details:\n\n"
+                        f"{details_str}\n\n"
+                        f"Please let me know if you need any additional assistance."
+                    )
+                details_map = {f: record_data[f] for f in fields_to_show}
+            else:
+                # Customer asked for all details / general verification
+                details_map = {}
+                if "account_number" in record_data:
+                    details_map["Account Number"] = record_data["account_number"]
+                if "full_name" in record_data:
+                    details_map["Account Name"] = record_data["full_name"]
+                for f in protected_fields:
+                    nice_key = _format_field_label(f)
+                    if nice_key not in details_map:
+                        details_map[nice_key] = record_data.get(f, "N/A")
+
+                detail_lines = [f"- {k}: {v}" for k, v in details_map.items()]
+                details_str = "\n".join(detail_lines)
+                reply = (
+                    f"Verification successful! Here are your verified account details:\n\n"
+                    f"{details_str}\n\n"
+                    f"Please let me know if you need any additional assistance."
+                )
+
+            return {
+                "tool_results": [f"kyc: PASSED (score {score:.0%}). Protected data: {json.dumps(details_map)}"],
+                "reply": sanitize_human_tone(reply),
+            }
         else:
-            return {"tool_results": [f"kyc: FAILED (score {score:.0%})"],
-                    "reply": referral_message}
+            return {
+                "tool_results": [f"kyc: FAILED (score {score:.0%})"],
+                "reply": sanitize_human_tone(referral_message),
+            }
 
     return {}
 
 
-def _extract_lookup_value(query: str, lookup_key: str) -> str:
+def _extract_lookup_value(query: str, lookup_key: str = "email") -> str:
     """Extract a lookup value (email, phone, account number) from the customer's message."""
     import re
     # Try email first
-    if lookup_key in ("email", "e_mail"):
-        match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', query)
-        if match:
-            return match.group(0).lower()
-    # Try phone
-    if lookup_key in ("phone", "phone_number", "mobile", "mobile_number"):
-        match = re.search(r'[\d\s\-\+\(\)]{7,}', query)
-        if match:
-            return re.sub(r'[\s\-\(\)]', '', match.group(0))
-    # Try account number / ID — just grab the last "word" that looks like an identifier
-    if lookup_key in ("account_number", "account", "id", "customer_id"):
-        match = re.search(r'[A-Za-z0-9]{4,}', query)
-        if match:
-            return match.group(0).upper()
-    # Fallback: return the whole query trimmed
+    email_match = re.search(r'[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}', query)
+    if email_match:
+        return email_match.group(0).lower().strip()
+
+    # Try phone (Nigerian mobile format or standard digits 10-15)
+    clean_no_spaces = re.sub(r'[\s\-\(\)]', '', query)
+    phone_match = re.search(r'(?:\+?234|0)[789][01]\d{8}', clean_no_spaces)
+    if phone_match:
+        return phone_match.group(0)
+
+    # General phone digits
+    digits_match = re.findall(r'\b\d{7,15}\b', query)
+    if digits_match:
+        return digits_match[0]
+
+    # Try account number / alphanumeric identifier
+    code_match = re.search(r'\b[A-Za-z0-9]{6,20}\b', query)
+    if code_match:
+        return code_match.group(0).strip()
+
     return query.strip()
 
 
-def _generate_kyc_questions(quiz_fields: list, record_data: dict, total: int) -> list:
+def _generate_kyc_questions(quiz_fields: list, record_data: dict, total: int, exclude_value: str | None = None) -> list:
     """Generate quiz questions from the record data for the given fields."""
-    import random
     questions = []
-    available = [f for f in quiz_fields if f in record_data]
-    random.shuffle(available)
-    for field in available[:total]:
+    exclude_clean = (exclude_value or "").strip().lower()
+    candidate_fields = []
+    for f in quiz_fields:
+        if f not in record_data:
+            continue
+        val = str(record_data[f]).strip().lower()
+        if exclude_clean and (val == exclude_clean or exclude_clean in val or val in exclude_clean):
+            continue
+        candidate_fields.append(f)
+
+    if len(candidate_fields) < min(total, len([f for f in quiz_fields if f in record_data])):
+        candidate_fields = [f for f in quiz_fields if f in record_data]
+
+    for field in candidate_fields[:total]:
         value = record_data[field]
         question = _field_to_question(field)
         questions.append({"field": field, "question": question, "expected": str(value), "answer_given": None, "correct": None})
     return questions
+
+
+def _format_field_label(field: str) -> str:
+    """Format a database field name into a clean user-facing title."""
+    mapping = {
+        "account_number": "Account Number",
+        "full_name": "Account Name",
+        "balance": "Balance",
+        "account_type": "Account Type",
+        "address": "Address",
+        "bvn": "BVN",
+        "nin": "NIN",
+        "date_of_birth": "Date of Birth",
+        "phone_number": "Phone Number",
+        "email": "Email",
+        "state_of_origin": "State of Origin",
+        "bvn_status": "BVN Status",
+        "kyc_tier": "KYC Tier",
+        "mother_maiden_name": "Mother's Maiden Name",
+    }
+    return mapping.get(field, field.replace("_", " ").title())
+
+
+def _detect_requested_fields(query: str, available_fields: list[str] | None = None) -> list[str]:
+    """Detect which account / profile fields a customer is specifically asking for."""
+    if not query:
+        return []
+    q = query.lower()
+
+    # Check for requests for ALL details or full profile
+    all_signals = (
+        "all details", "all my details", "all my info", "all information",
+        "all my account details", "full details", "everything", "my details",
+        "account details", "profile details", "what details do you have",
+        "show me all", "what information do you have", "what do you have on file",
+    )
+    if any(sig in q for sig in all_signals):
+        return ["all"]
+
+    field_patterns: list[tuple[str, list[str]]] = [
+        ("account_number", ["account number", "account num", "account no", "acct no", "acct num", "account #", "account digits", "my account number"]),
+        ("balance", ["balance", "account balance", "bank balance", "how much is in my account", "how much do i have", "my balance", "available balance"]),
+        ("address", ["address", "home address", "residential address", "location", "house address", "where do i live", "my address", "residential"]),
+        ("bvn", ["bvn", "bank verification number"]),
+        ("nin", ["nin", "national identity", "national id"]),
+        ("date_of_birth", ["date of birth", "dob", "birthday", "birth date"]),
+        ("full_name", ["full name", "account name", "my name", "name on account"]),
+        ("phone_number", ["phone number", "phone no", "mobile number", "my phone"]),
+        ("email", ["email address", "my email"]),
+        ("account_type", ["account type", "type of account", "package"]),
+        ("state_of_origin", ["state of origin", "origin", "state"]),
+        ("bvn_status", ["bvn status"]),
+        ("kyc_tier", ["kyc tier", "tier"]),
+    ]
+
+    matched: list[str] = []
+    for f_key, aliases in field_patterns:
+        if any(alias in q for alias in aliases):
+            if f_key not in matched:
+                matched.append(f_key)
+
+    # If nothing matched from standard patterns, check available columns directly
+    if not matched and available_fields:
+        for f in available_fields:
+            clean_f = f.replace("_", " ").lower()
+            if len(clean_f) >= 3 and clean_f in q:
+                if f not in matched:
+                    matched.append(f)
+
+    return matched
 
 
 def _field_to_question(field: str) -> str:
@@ -547,65 +1025,135 @@ def _field_to_question(field: str) -> str:
         "Account Number": "What is your account number?",
         "Bvn": "What is your BVN?",
         "Nin": "What is your NIN?",
+        "Mother Maiden Name": "What is your mother's maiden name?",
+        "State Of Origin": "What is your state of origin?",
+        "Account Type": "What is your account type?",
     }
     return mapping.get(nice, f"What is your {nice}?")
 
 
 def _parse_quiz_answers(query: str, expected_count: int) -> list:
-    """Parse customer answers from their message. Tries to split by numbered list or newlines."""
+    """Parse customer answers from their message. Tries numbered list, newlines, commas, or semicolons."""
     import re
-    # Try splitting by numbered list: "1. answer 2. answer" or "1) answer"
+    # 1. Numbered list: "1. answer 2. answer" or "1) answer 2) answer"
     parts = re.split(r'(?:^|\n)\s*(?:\d+[\.\)]\s*)', query.strip())
     parts = [p.strip() for p in parts if p.strip()]
     if len(parts) >= expected_count:
         return parts[:expected_count]
-    # If only one answer but multiple expected, try splitting by comma or semicolon
-    if len(parts) == 1 and expected_count > 1:
-        parts = re.split(r'[,;]', query.strip())
-        parts = [p.strip() for p in parts if p.strip()]
-    return parts
+
+    # 2. Line by line
+    lines = [p.strip() for p in query.strip().splitlines() if p.strip()]
+    if len(lines) >= expected_count:
+        return lines[:expected_count]
+
+    # 3. Split by comma or semicolon
+    comma_parts = re.split(r'[,;]', query.strip())
+    comma_parts = [p.strip() for p in comma_parts if p.strip()]
+    if len(comma_parts) >= expected_count:
+        return comma_parts[:expected_count]
+
+    return parts or lines or comma_parts
 
 
-def _score_kyc_answers(questions: list, answers: list, record_data: dict) -> float:
-    """Score KYC answers using fuzzy matching. Returns 0.0 - 1.0."""
+def _extract_labeled_field(field: str, text: str) -> str | None:
+    """Extract a specific field's answer when labeled in customer text (e.g. 'Name: John', 'BVN: 123...')."""
+    import re
+    patterns = {
+        'full_name': [r'(?:name|full[ _]name)\s*[:=-]\s*([^\n\r,;]+)'],
+        'date_of_birth': [r'(?:dob|date[ _]of[ _]birth|birth)\s*[:=-]\s*([^\n\r,;]+)', r'\b\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4}\b'],
+        'phone_number': [r'(?:phone|phone[ _]number|mobile)\s*[:=-]\s*([^\n\r,;]+)', r'\b(?:\+?234|0)[789][01]\d{8}\b'],
+        'phone': [r'(?:phone|phone[ _]number|mobile)\s*[:=-]\s*([^\n\r,;]+)', r'\b(?:\+?234|0)[789][01]\d{8}\b'],
+        'bvn': [r'(?:bvn)\s*[:=-]\s*([^\n\r,;]+)', r'\b2\d{10}\b'],
+        'nin': [r'(?:nin)\s*[:=-]\s*([^\n\r,;]+)', r'\b\d{11}\b'],
+        'mother_maiden_name': [r'(?:mother(?:\'s)?(?:[ _]maiden)?(?:[ _]name)?|maiden[ _]name)\s*[:=-]\s*([^\n\r,;]+)'],
+        'state_of_origin': [r'(?:state(?:[ _]of[ _]origin)?)\s*[:=-]\s*([^\n\r,;]+)'],
+        'account_type': [r'(?:account[ _]type)\s*[:=-]\s*([^\n\r,;]+)'],
+    }
+    for pat in patterns.get(field.lower(), []):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1 if m.lastindex else 0).strip()
+    return None
+
+
+def _score_kyc_answers(questions: list, answers: list, record_data: dict, raw_query: str = "") -> float:
+    """Score KYC answers using labeled extraction, positional answers, and fuzzy matching."""
     if not questions:
         return 0.0
     correct = 0
     for i, q in enumerate(questions):
-        if i < len(answers) and _fuzzy_match(answers[i], record_data.get(q["field"], "")):
+        field = q["field"]
+        expected = record_data.get(field, "")
+        is_match = False
+
+        # 1. Try labeled field extraction from raw_query (e.g. "Name: Korede Alabi")
+        if raw_query:
+            labeled = _extract_labeled_field(field, raw_query)
+            if labeled and _fuzzy_match(labeled, expected):
+                is_match = True
+
+        # 2. Try positional parsed answers if labeled was not found
+        if not is_match and i < len(answers):
+            if _fuzzy_match(answers[i], expected):
+                is_match = True
+
+        # 3. Fallback: check if expected value appears directly in the raw query text
+        if not is_match and raw_query and _fuzzy_match_in_text(expected, raw_query):
+            is_match = True
+
+        if is_match:
             correct += 1
     return correct / len(questions)
 
 
+def _fuzzy_match_in_text(expected: Any, text: str) -> bool:
+    """Check if an expected value appears anywhere in the raw text message."""
+    if not expected or not text:
+        return False
+    exp_str = str(expected).lower().strip()
+    text_str = text.lower()
+    if exp_str in text_str:
+        return True
+    import re
+    exp_digits = re.sub(r'\D', '', exp_str)
+    text_digits = re.sub(r'\D', '', text_str)
+    if len(exp_digits) >= 6 and exp_digits in text_digits:
+        return True
+    return False
+
+
 def _fuzzy_match(provided: str, expected: str) -> bool:
-    """Fuzzy match two strings — handles phone normalization, partial name match, etc."""
+    """Fuzzy match two strings, handling phone normalization, name order, dates, labels, and casing."""
     import re
     p = provided.lower().strip()
     e = str(expected).lower().strip()
     if not p or not e:
         return False
+    # Strip common label prefixes from provided (e.g. "Name: ...", "BVN: ...")
+    p = re.sub(
+        r'^(?:name|full[ _]name|dob|date[ _]of[ _]birth|birth|phone|phone[ _]number|mobile|bvn|nin|mother(?:\'s)?(?:[ _]name)?|mother[ _]maiden[ _]name)\s*[:=-]\s*',
+        '', p
+    ).strip()
     # Exact match
     if p == e:
         return True
-    # Phone: strip all non-digits and compare last N digits
+    # Phone digits
     p_digits = re.sub(r'\D', '', p)
     e_digits = re.sub(r'\D', '', e)
     if p_digits and e_digits:
         if p_digits == e_digits:
             return True
-        # Compare last 7 digits (handles +234 prefix differences)
-        if len(p_digits) >= 7 and len(e_digits) >= 7:
-            if p_digits[-7:] == e_digits[-7:]:
-                return True
-    # Name: check if all parts of provided are in expected
+        if len(p_digits) >= 7 and len(e_digits) >= 7 and p_digits[-7:] == e_digits[-7:]:
+            return True
+    # Name tokens
     p_parts = set(p.split())
     e_parts = set(e.split())
     if p_parts and e_parts and p_parts.issubset(e_parts):
         return True
-    # Partial: check if provided is a substring of expected or vice versa
-    if p in e or e in p:
+    # Partial substring
+    if len(p) >= 3 and (p in e or e in p):
         return True
-    # Date: try matching without separators
+    # Date formatting (DD/MM/YYYY vs DD-MM-YYYY vs DDMMYYYY)
     p_clean = re.sub(r'[/\-\.]', '', p)
     e_clean = re.sub(r'[/\-\.]', '', e)
     if p_clean and e_clean and p_clean == e_clean:
@@ -1200,18 +1748,21 @@ def compose_system_prompt(
         f"You help customers resolve issues quickly and accurately.",
 
         "HOW TO ANSWER\n"
-        "1. Lead with the direct answer to the customer's LATEST message — no preamble, "
+        "1. Lead with the direct answer to the customer's LATEST message, no preamble, "
         "no 'As an AI' talk, no restating their question.\n"
         "2. For steps or options, use short numbered items. Keep every line scannable.\n"
         "3. If the customer sounds frustrated or explicitly asks for a person, open with ONE "
-        "short empathetic sentence, then offer/confirm transfer to a human agent.\n"
+        "short empathetic sentence, then offer or confirm transfer to a human agent.\n"
         "4. End with at most ONE specific next step or question that moves the issue forward. "
         "Never generic filler like \"Is there anything else I can help with?\".\n"
-        "5. Keep replies roughly 40–120 words unless genuine step-by-step detail needs more.",
+        "5. Keep replies roughly 40 to 120 words unless genuine step-by-step detail needs more.\n"
+        "6. TONE AND PUNCTUATION: Speak in a warm, natural, friendly, human voice. NEVER use em-dashes ('—'), "
+        "en-dashes ('–'), or double hyphens ('--') anywhere in your reply. Do not use hyphens as sentence breaks. "
+        "Always use natural conversational punctuation like commas and periods.",
 
         "FACTS & GROUNDING\n"
-        "- Account/order/payment specifics may ONLY come from TOOL FACTS below. If absent, "
-        "ask the customer for the missing reference or say a human will verify it — never guess.\n"
+        "- Account, order, or payment specifics may ONLY come from TOOL FACTS below. If absent, "
+        "ask the customer for the missing reference or say a human will verify it. Never guess.\n"
         "- Prefer answers grounded in the KNOWLEDGE BASE. If it doesn't cover the question, say "
         "you'll confirm with the team rather than improvising policy.\n"
         "- Never invent tracking numbers, dates, amounts, or policy exceptions.",
@@ -1223,11 +1774,11 @@ def compose_system_prompt(
         parts.append(guardrails.wrap_knowledge_base(context))
     tool_results = tool_results or []
     if tool_results:
-        parts.append("--- FACTS FROM TOOLS (authoritative — use these numbers/details verbatim when relevant) ---\n"
+        parts.append("--- FACTS FROM TOOLS (authoritative, use these numbers and details verbatim when relevant) ---\n"
                      + "\n".join(tool_results)
                      + "\n--- END TOOL FACTS ---")
     if customer and customer.get("is_vip"):
-        parts.append("This customer is a VIP — prioritise speed and a personal touch.")
+        parts.append("This customer is a VIP, prioritise speed and a personal touch.")
 
     base = "\n\n".join(parts)
 
@@ -1241,7 +1792,7 @@ def compose_system_prompt(
 
 def _generate(state: AgentState, config) -> dict:
     if state.get("reply"):
-        return {"reply": state["reply"]}
+        return {"reply": sanitize_human_tone(state["reply"])}
     tenant = state.get("tenant") or {}
 
     system = compose_system_prompt(
@@ -1282,11 +1833,11 @@ def _generate(state: AgentState, config) -> dict:
             reply = "".join(chunks) or _heuristic_reply(user_query, business)
             reply, flagged = guardrails.guard_output(reply, settings.max_reply_words)
             if flagged:
-                return {"reply": _heuristic_reply(user_query, business)}
-            return {"reply": reply}
+                return {"reply": sanitize_human_tone(_heuristic_reply(user_query, business))}
+            return {"reply": sanitize_human_tone(reply)}
         except Exception:
             logger.warning("Groq reply failed; using keyword fallback.", exc_info=True)
-    return {"reply": _heuristic_reply(user_query, business)}
+    return {"reply": sanitize_human_tone(_heuristic_reply(user_query, business))}
 
 
 # -------------------------------------------------------------------- graph
@@ -1425,7 +1976,7 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
                 logger.exception("Failed to escalate stale human-assist")
         # Previous turn is awaiting human approval. Don't start a new run on
         # this thread (it would resume the interrupted graph); hold instead.
-        hold = ("One moment — our team is still confirming your last request. "
+        hold = ("One moment, our team is still confirming your last request. "
                 "You'll get an update shortly.")
         for i in range(0, len(hold), 14):
             yield {"token": hold[i:i + 14]}
@@ -1443,6 +1994,7 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
                 text = chunk.text if hasattr(chunk, "text") else ""
                 if not text:
                     continue
+                text = text.replace("—", ", ").replace("–", ", ").replace("--", ", ")
                 room = cap - sent_words
                 if room <= 0:
                     break
@@ -1471,18 +2023,19 @@ async def stream_agent(tenant_id: str, ticket_id: str, query: str):
             # every online agent + broadcast a pending event so the dashboard
             # can show an "answer this" prompt.
             if customer_reply:
-                yield {"token": customer_reply}
+                yield {"token": sanitize_human_tone(customer_reply)}
             _notify_assist(ticket_id, payload)
             publish_event("human_assist_pending", {"ticket_id": ticket_id, "payload": payload})
             yield {"done": True, "response_by": "ai", "human_assist_pending": True, "assist_payload": payload}
         else:
             if customer_reply:
-                yield {"token": customer_reply}
+                yield {"token": sanitize_human_tone(customer_reply)}
             publish_event("agent_approval_pending", {"ticket_id": ticket_id, "payload": payload})
             yield {"done": True, "response_by": "ai", "needs_approval": True, "approval_payload": payload}
     else:
         reply = (state.values or {}).get("reply")
         if reply:
+            reply = sanitize_human_tone(reply)
             reply, _flagged = guardrails.guard_output(reply, cap)
         if not streamed and reply:
             for i in range(0, len(reply), 14):

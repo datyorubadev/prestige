@@ -33,10 +33,24 @@ const INGEST_TABS: { id: IngestTab; label: string; icon: IconName }[] = [
 /** Ingestion stages (guide §5.4): extract → chunk/embed → index. */
 const STAGES = ["Extracting content…", "Chunking & embedding…", "Indexing into the knowledge base…"];
 
-const SOURCE_ICON: Record<KnowledgeSource["type"], IconName> = {
+const SOURCE_ICON: Record<string, IconName> = {
   link: "link",
   pdf: "file",
   raw_text: "edit",
+  markdown: "file",
+  docx: "file",
+  csv: "file",
+  file: "file",
+};
+
+const TYPE_LABEL: Record<string, string> = {
+  link: "Link",
+  pdf: "PDF",
+  raw_text: "Raw Text",
+  markdown: "Markdown",
+  docx: "Word Document",
+  csv: "CSV",
+  file: "File",
 };
 
 const FAQ_PAGE_SIZE = 10;
@@ -130,7 +144,7 @@ function SourcePreviewContent({ text }: { text: string }) {
       // fall back to the raw text
     }
     return (
-      <pre className="max-h-[50vh] overflow-y-auto whitespace-pre-wrap rounded-sm border border-border bg-surface-2 p-4 font-mono text-[12px] leading-relaxed text-text">
+      <pre className="max-h-[68vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-surface-2 p-4 font-mono text-[12px] leading-relaxed text-text">
         {pretty}
       </pre>
     );
@@ -146,7 +160,7 @@ function SourcePreviewContent({ text }: { text: string }) {
       const header = firstIsHeader ? rows[0] : null;
       const cols = Math.max(...rows.map((r) => r.length));
       return (
-        <div className="max-h-[50vh] overflow-auto rounded-sm border border-border">
+        <div className="max-h-[68vh] overflow-auto rounded-md border border-border">
           <table className="w-full border-collapse text-left text-[12px]">
             <thead>
               <tr>
@@ -177,19 +191,9 @@ function SourcePreviewContent({ text }: { text: string }) {
     }
   }
 
-  const formatted = formatReadableText(text);
-  const hasFence = /^```/m.test(formatted);
   return (
-    <div className="max-h-[50vh] overflow-y-auto rounded-sm border border-border bg-surface-2 px-5 py-4 text-[13px] leading-relaxed text-text">
-      {hasFence ? (
-        <Markdown text={formatted} />
-      ) : (
-        <div className="space-y-3">
-          {formatted.split("\n\n").map((paragraph, i) => (
-            <Markdown key={i} text={paragraph} />
-          ))}
-        </div>
-      )}
+    <div className="max-h-[68vh] overflow-y-auto rounded-md border border-border bg-surface-2 px-6 py-5 text-[13px] leading-relaxed text-text">
+      <Markdown text={text} />
     </div>
   );
 }
@@ -714,12 +718,12 @@ export function KnowledgeUpload() {
                 {sources.map((s) => (
                   <li key={s.id} className="flex items-center gap-3.5 px-4 py-3.5">
                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-info-soft text-info">
-                      <Icon name={SOURCE_ICON[s.type]} size={16} />
+                      <Icon name={SOURCE_ICON[s.type] ?? "file"} size={16} />
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13.5px] font-semibold text-text">{s.title}</p>
                       <p className="mt-0.5 truncate text-[11.5px] text-text-3">
-                        {s.type === "link" && s.url ? s.url : `${s.type.replace("_", " ")}`}
+                        {s.type === "link" && s.url ? s.url : (TYPE_LABEL[s.type] ?? s.type.replace("_", " "))}
                         {s.sizeKb ? ` · ${s.sizeKb} KB` : ""} · {s.chunks} chunks · {s.createdAt}
                       </p>
                     </div>
@@ -873,8 +877,9 @@ export function KnowledgeUpload() {
         open={!!previewSource}
         onClose={() => setPreviewSource(null)}
         title={previewSource?.title ?? "Preview source"}
-        icon={previewSource ? SOURCE_ICON[previewSource.type] : "book"}
-        size="lg"
+        icon={previewSource ? (SOURCE_ICON[previewSource.type] ?? "book") : "book"}
+        size="2xl"
+        className="!max-w-[1240px] !w-[96vw]"
       >
         {previewSource && (
           <div className="flex flex-col gap-3">
@@ -882,7 +887,9 @@ export function KnowledgeUpload() {
               {previewSource.type === "link" && previewSource.url ? (
                 <span className="truncate font-medium text-info">{previewSource.url}</span>
               ) : (
-                <span className="font-medium capitalize">{previewSource.type.replace("_", " ")}</span>
+                <span className="inline-flex items-center rounded bg-surface-3 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-text">
+                  {TYPE_LABEL[previewSource.type] ?? previewSource.type.replace("_", " ")}
+                </span>
               )}
               {previewSource.sizeKb ? <span>· {previewSource.sizeKb} KB</span> : null}
               <span>· {previewSource.chunks} chunks · {previewSource.createdAt}</span>

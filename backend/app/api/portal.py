@@ -135,20 +135,20 @@ def portal_create_ticket(body: PortalTicketCreate, db: Db,
     db.add(portal_msg)
     db.commit()
     db.refresh(portal_msg)
-    publish_event("ticket_created", {"ticket_id": ticket.id, "email": email})
+    publish_event("ticket_created", {"ticket_id": ticket.id, "email": email, "channel": "portal"}, tenant_id=tenant.id)
     publish_event("message_created", {
         "ticket_id": ticket.id,
         "message_id": portal_msg.id,
         "who": "customer",
         "text": ticket_text,
         "attachments": body.attachments or [],
-    })
+    }, tenant_id=tenant.id)
 
     from app.services import agent, chat_service, escalation
     fired = escalation.evaluate(db, tenant, ticket, ticket_text)
     if fired:
         escalation.apply(db, tenant, ticket, fired)
-        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
+        publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     else:
         try:
             res = agent.invoke_agent(tenant.id, ticket.id, ticket_text)
@@ -281,7 +281,7 @@ def portal_reply_ticket(ticket_id: str, body: PortalReplyRequest, db: Db,
         "who": "customer",
         "text": text,
         "attachments": body.attachments or [],
-    })
+    }, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -299,7 +299,7 @@ def portal_close_ticket(ticket_id: str, body: PortalReopenRequest, db: Db,
     ticket.resolved_at = datetime.utcnow()
     db.commit()
     db.refresh(ticket)
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 
@@ -323,7 +323,7 @@ def portal_csat_ticket(ticket_id: str, body: PortalCsatRequest, db: Db,
     ticket.csat_comment = body.comment
     db.commit()
     db.refresh(ticket)
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "csat": ticket.csat_rating})
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "csat": ticket.csat_rating}, tenant_id=tenant.id)
     return ticket_dto(ticket)
 
 

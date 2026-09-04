@@ -20,10 +20,10 @@ export type TicketChannel = "chat" | "whatsapp" | "portal" | "email" | "telegram
 
 export type MessageSender = "customer" | "ai_bot" | "ai" | "human_agent" | "system" | "agent";
 
-export type KnowledgeType = "pdf" | "link" | "raw_text";
+export type KnowledgeType = "pdf" | "link" | "raw_text" | "markdown" | "docx" | "csv" | "file";
 
 /** Ingested knowledge source shown on /dashboard/upload (§6.2). */
-export type KnowledgeSourceType = "link" | "pdf" | "raw_text";
+export type KnowledgeSourceType = "link" | "pdf" | "raw_text" | "markdown" | "docx" | "csv" | "file";
 
 export interface KnowledgeSource {
   id: string;
@@ -213,6 +213,7 @@ export interface Ticket {
   type: TicketType;
   sentiment: string;
   time: string;
+  createdAt?: string;
   unread: boolean;
   sla?: string;
   assignee: string | null;

@@ -118,7 +118,7 @@ class ChatRequest(BaseModel):
 
 
 def _sse(frame: dict) -> str:
-    return f"data: {json.dumps(frame)}\n\n"
+    return f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
 
 
 async def _chat_stream(ticket_id: str, query: str):
@@ -166,8 +166,9 @@ async def _chat_stream(ticket_id: str, query: str):
         done_frame: dict = {"done": True, "response_by": "ai"}
         async for frame in agent.stream_agent(tenant_id, ticket_id, merged_query):
             if frame.get("token"):
-                reply_parts.append(frame["token"])
-                yield _sse({"token": frame["token"]})
+                token = frame["token"].replace("—", ", ").replace("–", ", ").replace("--", ", ")
+                reply_parts.append(token)
+                yield _sse({"token": token})
             elif frame.get("done"):
                 done_frame = {k: v for k, v in frame.items() if k != "token"}
                 yield _sse(done_frame)

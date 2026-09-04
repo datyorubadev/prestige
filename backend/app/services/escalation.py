@@ -129,35 +129,41 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
         else f"Auto-routed by escalation rules: {rule_names}"
     )
 
-    db.add(Message(
+    escalation_msg = Message(
         ticket_id=ticket.id, sender_type=MessageSender.SYSTEM, sender_name="System",
         body=note or "Escalated · " + rule_names +
              (" · priority HIGH" if any("HIGH" in (r.action or "").upper() for r in fired) else ""),
         is_bot=False, is_read=True,
-    ))
+    )
+    db.add(escalation_msg)
 
     # Trigger stats for the owner-facing rules screen (§4.3).
     for rule in fired:
         rule.trigger_count += 1
         rule.last_fired_ticket_id = ticket.id
 
-    # Route to the first available agent; notify the whole tenant team.
-    agents = (
+    # Route to the first available agent (prioritizing active human agents over workspace owner);
+    # notify the whole tenant team.
+    staff_users = (
         db.query(User)
         .filter(User.tenant_id == tenant.id, User.role != Role.CUSTOMER, User.is_active.is_(True))
-        .order_by(
-            User.presence_status.in_(["online", "away"]).desc(),
-            User.last_seen.is_not(None).desc(),
-            User.created_at,
-        )
         .all()
     )
-    online_agents = [a for a in agents if getattr(a, "presence_status", "offline") in ("online", "away")]
-    for i, agent in enumerate(agents):
+    # Sort agents first (Role.AGENT), then owners/admins, prioritizing online/away status
+    def _agent_sort_key(u: User):
+        is_agent = 1 if u.role == Role.AGENT else 0
+        is_online = 1 if getattr(u, "presence_status", "offline") in ("online", "away") else 0
+        has_seen = 1 if u.last_seen else 0
+        return (is_online, is_agent, has_seen, -(u.created_at.timestamp() if u.created_at else 0))
+
+    sorted_staff = sorted(staff_users, key=_agent_sort_key, reverse=True)
+    online_agents = [a for a in sorted_staff if getattr(a, "presence_status", "offline") in ("online", "away")]
+
+    for i, agent_user in enumerate(sorted_staff):
         if ticket.assignee_id is None and i == 0:
-            ticket.assignee_id = agent.id
+            ticket.assignee_id = agent_user.id
         db.add(Notification(
-            tenant_id=tenant.id, user_id=agent.id, type=NotificationType.ESCALATION,
+            tenant_id=tenant.id, user_id=agent_user.id, type=NotificationType.ESCALATION,
             title=f"Escalation · {format_ticket_number(ticket)}", body=ticket.subject, ticket_id=ticket.id,
         ))
     if not online_agents:
@@ -167,6 +173,8 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
             is_bot=False, is_read=True,
         ))
     db.commit()
+    db.refresh(escalation_msg)
+    db.refresh(ticket)
 
     from app.services.ticket_activity import record
     record(db, ticket.id, tenant.id, "Automation", "escalated",
@@ -174,9 +182,28 @@ def apply(db: Session, tenant: Tenant, ticket: Ticket, fired: list[EscalationRul
            detail=f"Escalation rules fired: {', '.join(r.name for r in fired)} — assigned to "
                   f"{ticket.assignee.full_name if ticket.assignee else 'first available agent'}")
 
-    publish_event("ticket_escalated", {"ticket_id": ticket.id, "status": ticket.status})
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
-    publish_event("notification", {"ticket_id": ticket.id})
+    publish_event("message_created", {
+        "ticket_id": ticket.id,
+        "message_id": escalation_msg.id,
+        "who": "system",
+        "text": escalation_msg.body,
+        "author": escalation_msg.sender_name,
+        "kind": "note",
+    }, tenant_id=tenant.id)
+
+    publish_event("ticket_escalated", {
+        "ticket_id": ticket.id,
+        "status": ticket.status,
+        "priority": ticket.priority,
+        "assist": {
+            "reason": ticket.ai_sentiment or "AI triage",
+            "summary": ticket.ai_summary or "",
+            "chunks": [],
+            "suggest": "",
+        },
+    }, tenant_id=tenant.id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
+    publish_event("notification", {"ticket_id": ticket.id}, tenant_id=tenant.id)
 
 
 def check_sla_timeouts(db: Session) -> int:

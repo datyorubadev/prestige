@@ -41,11 +41,15 @@ def _resolve_tenant_for_ticket(ticket_id: str) -> str | None:
         with SessionLocal() as db:
             t = db.get(Ticket, ticket_id)
             if t is None:
+                t = db.query(Ticket).filter((Ticket.id == ticket_id) | (Ticket.ticket_number == ticket_id)).first()
+            if t is None:
                 return None
             if len(_ticket_tenant) >= _TENANT_CACHE_MAX:
                 _ticket_tenant.clear()
-            _ticket_tenant[ticket_id] = t.tenant_id
-            return t.tenant_id
+            _ticket_tenant[str(t.id)] = str(t.tenant_id)
+            if t.ticket_number:
+                _ticket_tenant[str(t.ticket_number)] = str(t.tenant_id)
+            return str(t.tenant_id)
     except Exception:
         return None
 
@@ -185,9 +189,15 @@ event_bus = EventBus()
 
 
 def publish_event(type_: str, data: dict[str, Any], tenant_id: str | None = None) -> dict[str, Any]:
-    tid = tenant_id or data.get("tenant_id")
+    tid = str(tenant_id) if tenant_id else (str(data["tenant_id"]) if data.get("tenant_id") else None)
     if not tid and data.get("ticket_id"):
-        tid = _resolve_tenant_for_ticket(str(data["ticket_id"]))
+        resolved = _resolve_tenant_for_ticket(str(data["ticket_id"]))
+        if resolved:
+            tid = str(resolved)
+    if tid and data.get("ticket_id"):
+        _ticket_tenant[str(data["ticket_id"])] = str(tid)
+    if tid and "tenant_id" not in data:
+        data["tenant_id"] = str(tid)
     event = event_bus.publish(type_, data, tid)
 
     if tid and type_ not in _NOISY_WEBHOOK_TYPES:

@@ -88,18 +88,25 @@ def parse_csv_content(file_bytes: bytes) -> str:
         return file_bytes.decode("utf-8", errors="ignore")
 
 
+from app.models.common import KnowledgeType
+
+
 def parse_docx_bytes(file_bytes: bytes) -> str:
-    """Parses Word .docx document using native zipfile XML extraction."""
+    """Parses Word .docx document using native zipfile XML extraction, preserving paragraphs."""
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
             xml_content = zf.read("word/document.xml")
             tree = ET.fromstring(xml_content)
-            # Find all paragraph text elements (w:t)
             paragraphs = []
-            for elem in tree.iter():
-                if elem.tag.endswith("}t") and elem.text:
-                    paragraphs.append(elem.text)
-            return " ".join(paragraphs)
+            for p in tree.iter():
+                if p.tag.endswith("}p"):
+                    p_text = "".join(elem.text for elem in p.iter() if elem.tag.endswith("}t") and elem.text)
+                    if p_text.strip():
+                        paragraphs.append(p_text.strip())
+            if paragraphs:
+                return "\n\n".join(paragraphs)
+            text_nodes = [elem.text for elem in tree.iter() if elem.tag.endswith("}t") and elem.text]
+            return "\n\n".join(text_nodes)
     except Exception as exc:
         logger.warning("Native DOCX XML parsing fallback failed: %s", exc)
         return file_bytes.decode("utf-8", errors="ignore")
@@ -124,6 +131,39 @@ def parse_pdf_bytes(file_bytes: bytes) -> str:
     return cleaned[:50000]
 
 
+def extract_document_text_and_type(
+    file_bytes: bytes,
+    filename: str,
+) -> tuple[str, KnowledgeType]:
+    """Extracts genuine formatted document text and identifies its KnowledgeType.
+    
+    Preserves newlines, markdown headings, code blocks, lists and paragraph spacing.
+    """
+    fn_lower = filename.lower()
+
+    if fn_lower.endswith((".md", ".markdown")):
+        text = file_bytes.decode("utf-8", errors="ignore")
+        return text, KnowledgeType.MARKDOWN
+    elif fn_lower.endswith(".docx"):
+        text = parse_docx_bytes(file_bytes)
+        return text, KnowledgeType.DOCX
+    elif fn_lower.endswith(".pdf"):
+        text = parse_pdf_bytes(file_bytes)
+        return text, KnowledgeType.PDF
+    elif fn_lower.endswith(".csv"):
+        text = file_bytes.decode("utf-8", errors="ignore")
+        return text, KnowledgeType.CSV
+    elif fn_lower.endswith((".xlsx", ".xls")):
+        text = parse_csv_content(file_bytes)
+        return text, KnowledgeType.FILE
+    elif fn_lower.endswith((".txt", ".text", ".json")):
+        text = file_bytes.decode("utf-8", errors="ignore")
+        return text, KnowledgeType.RAW_TEXT
+    else:
+        text = file_bytes.decode("utf-8", errors="ignore")
+        return text, KnowledgeType.FILE
+
+
 def parse_document_to_chunks(
     file_bytes: bytes,
     filename: str,
@@ -133,41 +173,8 @@ def parse_document_to_chunks(
     
     Supported formats: .pdf, .docx, .doc, .xlsx, .xls, .csv, .txt, .md, .json
     """
-    fn_lower = filename.lower()
-    text = ""
-
-    if fn_lower.endswith(".csv"):
-        text = parse_csv_content(file_bytes)
-    elif fn_lower.endswith(".docx"):
-        text = parse_docx_bytes(file_bytes)
-    elif fn_lower.endswith(".pdf"):
-        text = parse_pdf_bytes(file_bytes)
-    elif fn_lower.endswith((".xlsx", ".xls")):
-        # Excel fallback parser: decode tab/comma text or parse zip if xlsx
-        text = parse_csv_content(file_bytes)
-    else:
-        text = file_bytes.decode("utf-8", errors="ignore")
-
-    words = text.split()
-    if not words:
-        return []
-
-    chunks = []
-    current_chunk: list[str] = []
-    current_len = 0
-
-    for word in words:
-        current_chunk.append(word)
-        current_len += len(word) + 1
-        if current_len >= chunk_size:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_len = 0
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return chunks
+    text, _ = extract_document_text_and_type(file_bytes, filename)
+    return split_text(text, chunk_size=chunk_size)
 
 
 def _fetch_safe(url: str):

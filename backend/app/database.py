@@ -158,6 +158,9 @@ _SCHEMA_ADDITIONS: dict[str, list[tuple[str, str]]] = {
         ("sso_provider", "VARCHAR(50)"),
         ("sso_subject", "VARCHAR(255)"),
     ],
+    "kyc_verification_sessions": [
+        ("requested_fields", "VARCHAR(255)"),
+    ],
 }
 
 

@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { LabelChip } from "@/components/ui/label-chip";
 import { useToast } from "@/components/ui/toast";
 import { Modal } from "@/components/ui/modal";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { useAuth } from "@/lib/auth";
 import { api, API_BASE } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth-store";
@@ -185,11 +186,26 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
   }, [activityOpen, setPanel]);
 
   // Realtime listeners
+  const matchesTicket = (tid: string) =>
+    Boolean(ticket && (tid === ticket.id || tid === activeId || (ticket.ticketNumber && tid === ticket.ticketNumber)));
+
   useRealtime(
     {
+      ticket_escalated: (ev) => {
+        const tid = String(ev.data?.ticket_id ?? "");
+        if (matchesTicket(tid)) {
+          setTicket((prev) => prev ? { ...prev, status: "escalated" as Ticket["status"] } : null);
+          toast("Ticket escalated — awaiting human agent");
+          void loadTicket();
+        }
+      },
       ticket_updated: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
+          if (ev.data?.status === "escalated") {
+            void loadTicket();
+            return;
+          }
           if (ev.data?.status) {
             setTicket((prev) => (prev ? { ...prev, status: String(ev.data.status) as Ticket["status"] } : null));
           }
@@ -197,58 +213,69 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       },
       message_created: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
           const text = String(ev.data?.text ?? "");
           const rawWho = String(ev.data?.who ?? "customer");
           const who: TicketMessage["who"] = rawWho === "agent" ? "human_agent" : rawWho === "ai" ? "ai_bot" : rawWho as TicketMessage["who"];
           const author = ev.data?.author ? String(ev.data.author) : undefined;
           const realMsgId = ev.data?.message_id ? String(ev.data.message_id) : undefined;
           const attachments = Array.isArray(ev.data?.attachments) ? (ev.data.attachments as WidgetAttachment[]) : [];
-          const kind = ev.data?.kind === "note" ? "note" as const : undefined;
-
-          if (who === "human_agent" && author === agentName) {
-            setTicket((prev) => {
-              if (!prev) return null;
-              const idx = prev.msgs.findIndex((m) => m.who === "human_agent" && m.text === text && (m.id ?? "").startsWith("agent-"));
-              if (idx !== -1) {
-                if (realMsgId) {
-                  const updated = [...prev.msgs];
-                  updated[idx] = { ...updated[idx], id: realMsgId };
-                  return { ...prev, msgs: updated };
-                }
-                return prev;
-              }
-              const newMsg: TicketMessage = {
-                id: realMsgId || `msg-${Date.now()}`,
-                who, text, author, kind,
-                timestamp: "Just now",
-                attachments: attachments.length ? attachments : undefined,
-              };
-              return { ...prev, msgs: [...prev.msgs, newMsg], preview: text || prev.preview };
-            });
-            return;
-          }
+          const kind = ev.data?.kind === "note" ? ("note" as const) : undefined;
 
           setTicket((prev) => {
             if (!prev) return null;
-            if (realMsgId && prev.msgs.some((m) => m.id === realMsgId)) return prev;
-            if (prev.msgs.some((m) => m.text === text && m.who === who && (!attachments.length || m.attachments?.length === attachments.length))) {
+
+            // 1. Deduplicate by exact realMsgId if already in the message list
+            if (realMsgId && prev.msgs.some((m) => m.id === realMsgId)) {
               return prev;
             }
+
+            // 2. Reconcile optimistic message sent from this client:
+            // agent replies (who: "human_agent") or internal notes (who: "system", kind: "note")
+            const optIdx = prev.msgs.findIndex(
+              (m) =>
+                (m.id?.startsWith("agent-") || m.id?.startsWith("msg-") || m.id?.startsWith("note-")) &&
+                m.who === who &&
+                m.text === text &&
+                (kind === undefined || m.kind === kind),
+            );
+
+            if (optIdx !== -1) {
+              if (realMsgId) {
+                const updated = [...prev.msgs];
+                updated[optIdx] = {
+                  ...updated[optIdx],
+                  id: realMsgId,
+                  attachments: attachments.length ? attachments : updated[optIdx].attachments,
+                };
+                return { ...prev, msgs: updated, preview: text || prev.preview, time: "Just now" };
+              }
+              return prev;
+            }
+
+            // 3. Brand new message (from another agent, customer, or AI bot)
             const newMsg: TicketMessage = {
               id: realMsgId || `msg-${Date.now()}`,
-              who, text, author, kind,
+              who,
+              text,
+              author,
+              kind,
               timestamp: "Just now",
               attachments: attachments.length ? attachments : undefined,
             };
-            return { ...prev, msgs: [...prev.msgs, newMsg], preview: text || prev.preview };
+            return {
+              ...prev,
+              msgs: [...prev.msgs, newMsg],
+              preview: text || prev.preview,
+              time: "Just now",
+            };
           });
         }
       },
       message_updated: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
         const mid = String(ev.data?.message_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId) && mid) {
+        if (matchesTicket(tid) && mid) {
           const newBody = String(ev.data?.body ?? "");
           setTicket((prev) => prev ? {
             ...prev,
@@ -259,23 +286,16 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       message_deleted: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
         const mid = String(ev.data?.message_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId) && mid) {
+        if (matchesTicket(tid) && mid) {
           setTicket((prev) => prev ? {
             ...prev,
             msgs: prev.msgs.filter((m) => m.id !== mid),
           } : null);
         }
       },
-      ticket_escalated: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
-          setTicket((prev) => prev ? { ...prev, status: "escalated" as Ticket["status"] } : null);
-          toast("Ticket escalated — awaiting human agent");
-        }
-      },
       ticket_assigned: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
           const assignedBy = String(ev.data?.assigned_by_name ?? "Someone");
           toast(`Ticket assigned by ${assignedBy}`);
           void loadTicket();
@@ -283,20 +303,20 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       },
       agent_approval_pending: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
           toast("Agent approval requested — review in the conversation", "warning");
         }
       },
       agent_approval_resolved: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
           const approved = Boolean(ev.data?.approved);
           toast(approved ? "Approval granted — agent resuming" : "Approval denied");
         }
       },
       customer_typing: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && (tid === ticket.id || tid === activeId)) {
+        if (matchesTicket(tid)) {
           setCustomerTyping(true);
           if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
           typingTimerRef.current = setTimeout(() => setCustomerTyping(false), 3000);
@@ -304,7 +324,7 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
       },
       ticket_presence: (ev) => {
         const tid = String(ev.data?.ticket_id ?? "");
-        if (ticket && tid === ticket.id) {
+        if (matchesTicket(tid)) {
           const userId = String(ev.data?.user_id ?? "");
           const userName = String(ev.data?.user_name ?? "");
           const action = String(ev.data?.action ?? "");
@@ -638,6 +658,28 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
     }
   };
 
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletingTicket, setDeletingTicket] = useState(false);
+
+  const handleDeleteTicket = async () => {
+    if (!ticket) return;
+    setDeletingTicket(true);
+    try {
+      await api.delete(`/tickets/${encodeURIComponent(ticket.id)}`);
+      toast("Ticket deleted");
+      setDeleteOpen(false);
+      if (onBack) {
+        onBack();
+      } else {
+        router.push("/dashboard/tickets");
+      }
+    } catch {
+      toast("Could not delete ticket", "danger");
+    } finally {
+      setDeletingTicket(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-surface p-12">
@@ -852,6 +894,15 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
                     Merge ticket
                   </button>
                 )}
+                <div className="my-1 h-px bg-border" />
+                <button
+                  type="button"
+                  onClick={() => { setDeleteOpen(true); setMoreOpen(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-[12px] font-medium text-danger hover:bg-danger/10 cursor-pointer"
+                >
+                  <Icon name="trash" size={13} className="text-danger" />
+                  Delete ticket
+                </button>
               </div>
             )}
           </div>
@@ -997,6 +1048,18 @@ export function TicketDetail({ ticketId, onBack, isEmbedded = false }: TicketDet
           })}
         </div>
       </Modal>
+
+      {/* ── Delete Confirmation Modal ── */}
+      <ConfirmModal
+        open={deleteOpen}
+        title="Delete ticket?"
+        description="Are you sure you want to permanently delete this conversation? All associated messages and activity history will be permanently removed. This action cannot be undone and will be recorded in the audit trail."
+        confirmLabel="Delete ticket"
+        tone="danger"
+        busy={deletingTicket}
+        onConfirm={() => void handleDeleteTicket()}
+        onClose={() => setDeleteOpen(false)}
+      />
 
       {/* ── Three-Panel Workspace ── */}
       <div className="flex min-h-0 flex-1 overflow-hidden">

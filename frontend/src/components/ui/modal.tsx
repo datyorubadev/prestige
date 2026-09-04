@@ -12,7 +12,8 @@ interface ModalProps {
   icon?: IconName;
   children: ReactNode;
   footer?: ReactNode;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "full";
+  className?: string;
   /** Optional id/aria-label for the dialog. Defaults to the title. */
   ariaLabel?: string;
 }
@@ -20,6 +21,15 @@ interface ModalProps {
 /** Branded overlay surface (design.md §4.1 Modal): slides up over a faded
  * overlay, traps focus, Esc or overlay-click closes, focus returns to the
  * opener on close. */
+const SIZE_CLASSES: Record<string, string> = {
+  sm: "sm !max-w-[440px]",
+  md: "!max-w-[620px]",
+  lg: "lg !max-w-[760px]",
+  xl: "xl !max-w-[960px]",
+  "2xl": "size-2xl !max-w-[1240px] !w-[96vw]",
+  full: "full !max-w-[1400px] !w-[98vw]",
+};
+
 export function Modal({
   open,
   onClose,
@@ -28,6 +38,7 @@ export function Modal({
   children,
   footer,
   size = "md",
+  className,
   ariaLabel,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -76,7 +87,11 @@ export function Modal({
         aria-modal="true"
         aria-label={ariaLabel ?? title}
         tabIndex={-1}
-        className={cn("modal-panel", size !== "md" && size)}
+        className={cn(
+          "modal-panel",
+          SIZE_CLASSES[size] ?? size,
+          className,
+        )}
       >
         {title && (
           <header className="modal-header">

@@ -9,6 +9,7 @@ import { avatarColorFor, cn, ticketNumberFor } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { useRealtime } from "@/lib/realtime";
 import { useUrlState } from "@/lib/use-url-state";
+import { useAuth } from "@/lib/auth";
 import type { Ticket } from "@/lib/types";
 
 interface QuickListProps {
@@ -28,6 +29,7 @@ const FILTER_OPTIONS = [
 ];
 
 export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProps) {
+  const { user } = useAuth();
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   // Filter persists in the URL (?filter=mine) so navigating away and back
@@ -49,81 +51,94 @@ export function QuickList({ currentId, onSelect, open, onToggle }: QuickListProp
     loadTickets();
   }, [loadTickets]);
 
+  const matchTicketIdx = (list: Ticket[], tid: string) =>
+    list.findIndex((t) => t.id === tid || (t.ticketNumber && (t.ticketNumber === tid || `#${t.ticketNumber}` === tid)));
+
   // Optimistic realtime: patch the ticket in-place and move it to the top,
-  // instead of refetching the entire list on every event.
-  useRealtime(
-    {
-      message_created: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (!tid) return;
-        setTickets((prev) => {
-          const idx = prev.findIndex((t) => t.id === tid);
-          if (idx === -1) return prev; // ticket not in our list, ignore
-          const ticket = prev[idx];
-          const text = String(ev.data?.text ?? ticket.preview ?? ticket.subject);
-          const updated = { ...ticket, preview: text, time: "Just now" };
-          // Move to top
-          const next = [...prev];
-          next.splice(idx, 1);
-          next.unshift(updated);
-          return next;
-        });
-      },
-      ticket_created: () => {
-        // Don't try to fabricate a partial Ticket with a dozen required fields —
-        // refetch the whole list so the new ticket renders correctly.
-        loadTickets();
-      },
-      ticket_deleted: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (!tid) return;
-        setTickets((prev) => prev.filter((t) => t.id !== tid));
-      },
-      ticket_updated: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (!tid) return;
-        if (ev.data?.status) {
-          setTickets((prev) => {
-            const idx = prev.findIndex((t) => t.id === tid);
-            if (idx === -1) return prev;
-            const next = [...prev];
-            next[idx] = { ...next[idx], status: String(ev.data.status) as Ticket["status"] };
-            return next;
-          });
+  // or refetch the list if the ticket is new.
+  useRealtime({
+    message_created: (ev) => {
+      const tid = String(ev.data?.ticket_id ?? "");
+      if (!tid) return;
+      setTickets((prev) => {
+        const idx = matchTicketIdx(prev, tid);
+        if (idx === -1) {
+          // Ticket not in our list yet (e.g. brand new conversation) — reload tickets!
+          loadTickets();
+          return prev;
         }
-      },
-      ticket_escalated: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (!tid) return;
-        setTickets((prev) => {
-          const idx = prev.findIndex((t) => t.id === tid);
-          if (idx === -1) return prev;
-          const next = [...prev];
-          next[idx] = { ...next[idx], status: "escalated" as Ticket["status"], time: "Just now" };
-          next.splice(idx, 1);
-          next.unshift(next[idx]);
-          return next;
-        });
-      },
-      ticket_assigned: (ev) => {
-        const tid = String(ev.data?.ticket_id ?? "");
-        if (!tid) return;
-        setTickets((prev) => {
-          const idx = prev.findIndex((t) => t.id === tid);
-          if (idx === -1) return prev;
-          const next = [...prev];
-          next[idx] = { ...next[idx], time: "Just now" };
-          next.splice(idx, 1);
-          next.unshift(next[idx]);
-          return next;
-        });
-      },
+        const ticket = prev[idx];
+        const text = String(ev.data?.text ?? ticket.preview ?? ticket.subject);
+        const isCurrent = currentId ? (ticket.id === currentId || ticket.ticketNumber === currentId || `#${ticket.ticketNumber}` === currentId) : false;
+        const updated: Ticket = {
+          ...ticket,
+          preview: text,
+          time: "Just now",
+          unread: isCurrent ? false : true,
+        };
+        const next = [...prev];
+        next.splice(idx, 1);
+        next.unshift(updated);
+        return next;
+      });
     },
-    { enabled: open },
-  );
+    ticket_created: () => {
+      loadTickets();
+    },
+    ticket_deleted: (ev) => {
+      const tid = String(ev.data?.ticket_id ?? "");
+      if (!tid) return;
+      setTickets((prev) => prev.filter((t) => t.id !== tid && t.ticketNumber !== tid && `#${t.ticketNumber}` !== tid));
+    },
+    ticket_updated: (ev) => {
+      const tid = String(ev.data?.ticket_id ?? "");
+      if (!tid) return;
+      setTickets((prev) => {
+        const idx = matchTicketIdx(prev, tid);
+        if (idx === -1) {
+          loadTickets();
+          return prev;
+        }
+        const next = [...prev];
+        const status = ev.data?.status ? (String(ev.data.status) as Ticket["status"]) : next[idx].status;
+        next[idx] = { ...next[idx], status };
+        return next;
+      });
+    },
+    ticket_escalated: (ev) => {
+      const tid = String(ev.data?.ticket_id ?? "");
+      if (!tid) return;
+      setTickets((prev) => {
+        const idx = matchTicketIdx(prev, tid);
+        if (idx === -1) {
+          loadTickets();
+          return prev;
+        }
+        const next = [...prev];
+        const updated = { ...next[idx], status: "escalated" as Ticket["status"], time: "Just now" };
+        next.splice(idx, 1);
+        next.unshift(updated);
+        return next;
+      });
+    },
+    ticket_assigned: (ev) => {
+      const tid = String(ev.data?.ticket_id ?? "");
+      if (!tid) return;
+      setTickets((prev) => {
+        const idx = matchTicketIdx(prev, tid);
+        if (idx === -1) {
+          loadTickets();
+          return prev;
+        }
+        const next = [...prev];
+        next[idx] = { ...next[idx], assignee: typeof ev.data?.assignee_name === "string" ? ev.data.assignee_name : next[idx].assignee };
+        return next;
+      });
+    },
+  });
 
   const filteredTickets = (() => {
-    if (filter === "mine") return tickets.filter((t) => !!t.assignee);
+    if (filter === "mine") return tickets.filter((t) => (user?.role === "agent" ? t.assignee === (user?.fullName ?? "") : !!t.assignee));
     if (filter === "unassigned") return tickets.filter((t) => !t.assignee && t.status !== "resolved" && t.status !== "closed");
     if (filter === "escalated") return tickets.filter((t) => t.status === "escalated");
     if (filter === "resolved") return tickets.filter((t) => t.status === "resolved" || t.status === "closed");

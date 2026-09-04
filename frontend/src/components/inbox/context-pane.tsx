@@ -93,7 +93,7 @@ export function ContextPane({
             <Kv label="Segment" value={segment} />
             <Kv label="Language" value="en-NG" />
             <Kv label="Sentiment" value={ticket.sentiment} />
-            <Kv label="Opened" value={ticket.time} />
+            <Kv label="Opened" value={ticket.createdAt || ticket.time} />
           </div>
           <p className="mt-2.5 text-[11.5px] text-text-2">
             {ticket.phone} · {channelLabel(ticket.channel)}
@@ -267,7 +267,7 @@ export function ContextPane({
                     onClick={() => onEscalate(ticket.id)}
                     className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-3 py-1.5 text-[12px] font-semibold text-text-2 transition-colors duration-150 hover:bg-surface-3 hover:text-text"
                   >
-                    Escalate to owner
+                    Escalate ticket
                   </button>
                 </div>
               </div>

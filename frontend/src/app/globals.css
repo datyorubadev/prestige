@@ -234,8 +234,9 @@
     color: var(--text);
   }
 
-  :focus-visible {
-    outline: none;
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
   }
 
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
@@ -709,12 +710,27 @@
     animation: slide-up 220ms ease;
   }
 
+  .modal-panel.sm {
+    max-width: 440px;
+  }
+
   .modal-panel.lg {
     max-width: 720px;
   }
 
-  .modal-panel.sm {
-    max-width: 440px;
+  .modal-panel.xl {
+    max-width: 920px;
+  }
+
+  .modal-panel.size-2xl {
+    max-width: min(1240px, calc(100vw - 32px)) !important;
+    width: 96vw !important;
+    max-height: min(calc(100dvh - 40px), 880px);
+  }
+
+  .modal-panel.full {
+    max-width: min(1360px, calc(100vw - 48px));
+    max-height: min(calc(100dvh - 48px), 880px);
   }
 
   .modal-header {

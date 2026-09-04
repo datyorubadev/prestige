@@ -1,0 +1,21 @@
+account_number,email,phone_number,full_name,date_of_birth,bvn,nin,address,state_of_origin,mother_maiden_name,balance,account_type,bvn_status,kyc_tier
+0123456789,tunde.bakare@example.com,08031234567,Tunde Bakare,15/08/1990,22233344455,10293847561,14 Admiralty Way Lekki Phase 1 Lagos,Lagos,Ogunlesi,NGN 1450200.50,Savings Premium,Verified,Tier 3 (Full KYC)
+0234567891,chioma.okonkwo@example.com,08129876543,Chioma Okonkwo,22/03/1994,22114433221,83920192837,8 Nnamdi Azikiwe Road Enugu,Enugu,Eze,NGN 580320.00,Current Corporate,Verified,Tier 3 (Full KYC)
+0345678912,ibrahim.musa@example.com,07055512345,Ibrahim Musa,10/11/1988,22334455667,91827364501,4 Ahmadu Bello Way Kaduna,Kaduna,Aliyu,NGN 89450.00,Savings Standard,Verified,Tier 2
+0456789123,amaka.eze@example.com,09012345678,Amaka Eze,05/07/1996,22445566778,74839201928,21 Old Aba Road Port Harcourt,Rivers,Nwachukwu,NGN 2150000.00,Diamond Wealth,Verified,Tier 3 (Full KYC)
+0567891234,babatunde.adeyemi@example.com,08098765432,Babatunde Adeyemi,12/12/1985,22556677889,58493029182,18 Allen Avenue Ikeja Lagos,Ogun,Balogun,NGN 740000.00,Business Classic,Verified,Tier 3 (Full KYC)
+0678912345,zainab.abubakar@example.com,08134567890,Zainab Abubakar,03/09/1993,22667788990,29384756102,12 Bompai Road Kano,Kano,Usman,NGN 315800.75,Savings Standard,Verified,Tier 3 (Full KYC)
+0789123456,emeka.nwosu@example.com,07034567891,Emeka Nwosu,18/01/1991,22778899001,49382716059,5 New Market Road Onitsha,Anambra,Okafor,NGN 42100.00,Student Target,Verified,Tier 1
+0890123456,fatima.danjuma@example.com,08023456789,Fatima Danjuma,27/06/1997,22889900112,67584930291,9 Shehu Shagari Way Abuja,Sokoto,Bello,NGN 3890400.00,Platinum Executive,Verified,Tier 3 (Full KYC)
+0901234567,femi.ogundipe@example.com,09087654321,Femi Ogundipe,14/04/1989,22990011223,38291049582,3 Bodija Market Road Ibadan,Oyo,Adewale,NGN 125600.00,Salary Direct,Verified,Tier 2
+0912345678,ngozi.obi@example.com,08187654321,Ngozi Obi,30/10/1995,22001122334,19283746501,15 Owerri Road Asaba,Delta,Umeh,NGN 980000.00,Savings Premium,Verified,Tier 3 (Full KYC)
+0112233445,korede.alabi@example.com,08051239874,Korede Alabi,09/02/1992,22119988776,56123498701,7 Marina Street Lagos Island,Lagos,Adeyemi,NGN 850300.20,Savings Standard,Verified,Tier 3 (Full KYC)
+0223344556,halima.sanusi@example.com,08162345678,Halima Sanusi,19/08/1998,22228877665,67234509812,25 Yakubu Gowon Way Jos,Plateau,Garba,NGN 430150.00,Student Target,Verified,Tier 2
+0334455667,osariemen.ehis@example.com,07089123456,Osariemen Ehis,11/05/1987,22337766554,78345610923,19 Airport Road Benin City,Edo,Idahosa,NGN 1620000.00,Diamond Wealth,Verified,Tier 3 (Full KYC)
+0445566778,yetunde.sholanke@example.com,09023456781,Yetunde Sholanke,24/11/1993,22446655443,89456721034,10 Oke-Mosan Crescent Abeokuta,Ogun,Sowemimo,NGN 295400.50,Savings Premium,Verified,Tier 3 (Full KYC)
+0556677889,damilola.adeleke@example.com,08067891234,Damilola Adeleke,08/04/1990,22555544332,90567832145,31 Ring Road Osogbo,Osun,Oyeniyi,NGN 672000.00,Business Classic,Verified,Tier 3 (Full KYC)
+0667788990,chinedu.ugwu@example.com,08178901235,Chinedu Ugwu,16/12/1986,22664433221,11678943256,12 Okpara Avenue Enugu,Enugu,Onoh,NGN 2105000.00,Current Corporate,Verified,Tier 3 (Full KYC)
+0778899001,maryam.idris@example.com,07012349876,Maryam Idris,02/03/1999,22773322110,22789054367,4 Kashim Ibrahim Way Maiduguri,Borno,Mustapha,NGN 155000.00,Savings Standard,Verified,Tier 2
+0889900112,samuel.akpan@example.com,08089012347,Samuel Akpan,21/07/1991,22882211009,33890165478,44 Oron Road Uyo,Akwa Ibom,Bassey,NGN 1240600.00,Platinum Executive,Verified,Tier 3 (Full KYC)
+0990011223,blessing.ayomide@example.com,09090123458,Blessing Ayomide,14/10/1994,22991100998,44901276589,8 Arakale Road Akure,Ondo,Akinyemi,NGN 53000.00,Student Target,Verified,Tier 1
+0101122334,olumide.alonge@example.com,08101234569,Olumide Alonge,28/01/1984,22000099887,55012387690,16 Awolowo Road Ikoyi Lagos,Ekiti,Fashola,NGN 3450000.00,Diamond Wealth,Verified,Tier 3 (Full KYC)

@@ -36,6 +36,7 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
         candidate = db.get(Ticket, session_id)
         if candidate and candidate.tenant_id == tenant.id:
             ticket = candidate
+    is_new_ticket = ticket is None
     if ticket is None:
         ticket = Ticket(tenant_id=tenant.id, subject=text[:120] if text else "New Conversation", channel="widget",
                         unread=True, sla_seconds_left=3600)
@@ -43,7 +44,6 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
         ensure_ticket_number(db, ticket)
         db.add(ticket)
         db.flush()
-        publish_event("ticket_created", {"ticket_id": ticket.id})
 
     msg = Message(
         ticket_id=ticket.id, sender_type=MessageSender.CUSTOMER,
@@ -53,6 +53,7 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
     )
     db.add(msg)
     ticket.unread = True
+    ticket.updated_at = datetime.utcnow()
     db.flush()
 
     from app.services.ticket_activity import record
@@ -72,14 +73,16 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
         db.commit()
     db.refresh(msg)
     db.refresh(ticket)
+    if is_new_ticket:
+        publish_event("ticket_created", {"ticket_id": ticket.id, "channel": ticket.channel}, tenant_id=tenant.id)
     publish_event("message_created", {
         "ticket_id": ticket.id,
         "message_id": msg.id,
         "who": "customer",
         "text": text,
         "attachments": attachments or [],
-    })
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    }, tenant_id=tenant.id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=tenant.id)
 
     return {
         "ticket": ticket_dto(ticket),
@@ -87,7 +90,7 @@ def widget_send(db: Session, tenant_id: str, session_id: str | None, text: str,
         "ticketId": ticket.id,
         "tenantId": tenant.id,
         "fired": [rule_dto(r) for r in fired],
-        "escalated": bool(fired),
+        "escalated": bool(fired) or ticket.status == "escalated",
         "tone": tenant.brand_tone,
     }
 
@@ -108,6 +111,7 @@ def persist_ai_reply(db: Session, ticket_id: str, text: str) -> dict:
     )
     db.add(msg)
     ticket.unread = True
+    ticket.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(msg)
     from app.services.ticket_activity import record
@@ -115,8 +119,8 @@ def persist_ai_reply(db: Session, ticket_id: str, text: str) -> dict:
            tenant.bot_name if tenant else "AI Assistant", "ai_replied",
            detail=f"AI reply: “{text[:120]}”")
     db.commit()
-    publish_event("message_created", {"ticket_id": ticket.id, "message_id": msg.id, "who": "ai", "text": text})
-    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status})
+    publish_event("message_created", {"ticket_id": ticket.id, "message_id": msg.id, "who": "ai", "text": text}, tenant_id=ticket.tenant_id)
+    publish_event("ticket_updated", {"ticket_id": ticket.id, "status": ticket.status}, tenant_id=ticket.tenant_id)
     return {"ok": True}
 
 

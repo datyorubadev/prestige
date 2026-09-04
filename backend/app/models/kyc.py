@@ -64,6 +64,7 @@ class KYCVerificationSession(Base):
     record_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("kyc_records.id"), nullable=True)  # matched customer record
 
     # Quiz state
+    requested_fields: Mapped[str | None] = mapped_column(String(255), nullable=True)  # JSON array of field names originally asked for (e.g. ["account_number"])
     lookup_value_used: Mapped[str | None] = mapped_column(String(255), nullable=True)  # what the customer provided to look up
     questions_asked: Mapped[str] = mapped_column(Text, default="[]")     # JSON array of {field, question, answer_given, correct}
     score: Mapped[float] = mapped_column(Float, default=0.0)
