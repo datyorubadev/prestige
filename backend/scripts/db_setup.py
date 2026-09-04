@@ -525,14 +525,28 @@ def seed() -> None:
         db.flush()
 
         # super admin (platform-wide, no tenant)
-        db.add(User(email="admin@prestige.io", password_hash=password_hash, full_name="Platform Admin",
-                    role=Role.SUPER_ADMIN, tenant_id=None))
+        existing_admin = db.query(User).filter(User.email == "admin@prestige.io").first()
+        if not existing_admin:
+            db.add(User(email="admin@prestige.io", password_hash=password_hash, full_name="Platform Admin",
+                        role=Role.SUPER_ADMIN, tenant_id=None))
+        else:
+            existing_admin.password_hash = password_hash
+
         for a in AGENT_DATA:
-            db.add(User(id=a["id"], tenant_id=a["tenant"], email=a["email"], password_hash=password_hash,
-                        full_name=a["name"], role=a["role"], color=a["color"]))
+            u = db.get(User, a["id"]) or db.query(User).filter(User.email == a["email"]).first()
+            if not u:
+                db.add(User(id=a["id"], tenant_id=a["tenant"], email=a["email"], password_hash=password_hash,
+                            full_name=a["name"], role=a["role"], color=a["color"]))
+            else:
+                u.password_hash = password_hash
+
         # demo customer (login-page "customer" role + portal sign-in)
-        db.add(User(tenant_id="t1", email="tunde.bakare@example.com", password_hash=password_hash,
-                    full_name="Tunde Bakare", role=Role.CUSTOMER, color="slate"))
+        existing_cust = db.query(User).filter(User.email == "tunde.bakare@example.com").first()
+        if not existing_cust:
+            db.add(User(tenant_id="t1", email="tunde.bakare@example.com", password_hash=password_hash,
+                        full_name="Tunde Bakare", role=Role.CUSTOMER, color="slate"))
+        else:
+            existing_cust.password_hash = password_hash
         db.flush()
 
         # team memberships: every owner/agent belongs to their tenant through a

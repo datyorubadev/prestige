@@ -53,24 +53,30 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def _ensure_bootstrap_admin() -> None:
-    """First-run bootstrap: when the DB has no users at all (fresh install),
-    create the platform super-admin from SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD
-    so there is always a guaranteed way into the app. Idempotent — never
-    touches an existing user."""
+    """First-run bootstrap: when the DB is fresh, seeds the initial platform
+    admin, demo tenants, owners, agents, and customer so live deployments work immediately."""
     from app.core.security import hash_password
-    from app.models import User
+    from app.models import Tenant, User
 
     with SessionLocal() as db:
-        if db.query(User).first():
-            return
-        db.add(User(
-            email=settings.super_admin_email,
-            password_hash=hash_password(settings.super_admin_password),
-            full_name="Platform Admin",
-            role="super_admin",
-            is_active=True,
-        ))
-        db.commit()
+        if db.query(Tenant).count() == 0:
+            try:
+                from scripts.db_setup import seed
+                seed()
+                return
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Auto-seed error: %s", exc)
+
+        if not db.query(User).first():
+            db.add(User(
+                email=settings.super_admin_email,
+                password_hash=hash_password(settings.super_admin_password),
+                full_name="Platform Admin",
+                role="super_admin",
+                is_active=True,
+            ))
+            db.commit()
 
 
 # Column additions applied to already-seeded databases (SQLite has no native
