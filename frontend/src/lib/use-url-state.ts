@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 /**
@@ -20,17 +20,27 @@ export function useUrlState(
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
+  // router.replace is async and each render's `searchParams` is a frozen
+  // snapshot, so two setters called in the same event handler would each
+  // rebuild the URL from the same stale snapshot and clobber each other
+  // (e.g. a tab click doing setView(v) + setPage(1) reverted view to default).
+  // Mirror the latest params in a ref so sequential writes compose instead.
+  const paramsRef = useRef(new URLSearchParams(searchParams.toString()));
+  useEffect(() => {
+    paramsRef.current = new URLSearchParams(searchParams.toString());
+  }, [searchParams]);
+
   const value = searchParams.get(key) ?? defaultValue;
 
   const setValue = useCallback(
     (next: string) => {
-      const params = new URLSearchParams(searchParams.toString());
+      const params = paramsRef.current;
       if (!next || next === defaultValue) params.delete(key);
       else params.set(key, next);
       const qs = params.toString();
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     },
-    [router, pathname, searchParams, key, defaultValue],
+    [router, pathname, key, defaultValue],
   );
 
   return [value, setValue] as const;
